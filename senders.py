@@ -1,4 +1,8 @@
+from datetime import datetime, timedelta
+
 from telegram import Bot
+
+from logger import logger
 
 
 async def send_telegram_message(token, chat_id, message):
@@ -13,12 +17,9 @@ async def send_telegram_message(token, chat_id, message):
     try:
         bot = Bot(token=token)
         await bot.send_message(chat_id=chat_id, text=message)
-        print("✅ Повідомлення успішно відправлено в Telegram")
+        logger.info("✅ Повідомлення успішно відправлено в Telegram")
     except Exception as e:
-        print(f"❌ Помилка відправки повідомлення в Telegram: {e}")
-
-
-from datetime import datetime, timedelta
+        logger.error(f"❌ Помилка відправки повідомлення в Telegram: {e}")
 
 
 def generate_schedule_message(schedule):
@@ -35,7 +36,7 @@ def generate_schedule_message(schedule):
     message = "🔔 Новий графік відключень:\n"
     for date, times in schedule.items():
         if not times:
-            message += f"📅 {datetime.strptime(date, '%Y-%m-%d').strftime('%d-%m-%Y')}: відключення не плануються, або ще не заплановані\n"
+            message += f"\n📅 {datetime.strptime(date, '%Y-%m-%d').strftime('%d-%m-%Y')}: відключення не плануються, або ще не заплановані\n"
             continue
 
         intervals = []
@@ -47,7 +48,10 @@ def generate_schedule_message(schedule):
             if datetime.strptime(time, "%H:%M") - datetime.strptime(
                 prev_time, "%H:%M"
             ) > timedelta(hours=1):
-                intervals.append(f"{start_time} по {prev_time}")
+                end_time = (
+                    datetime.strptime(prev_time, "%H:%M") + timedelta(hours=1)
+                ).strftime("%H:%M")
+                intervals.append(f"{start_time} по {end_time}")
                 start_time = time
             prev_time = time
 
@@ -61,8 +65,11 @@ def generate_schedule_message(schedule):
             ).strftime("%H:%M")
             intervals.append(f"{start_time} по {end_time}")
         else:
-            intervals.append(f"{start_time} по {prev_time}")
+            end_time = (
+                datetime.strptime(prev_time, "%H:%M") + timedelta(hours=1)
+            ).strftime("%H:%M")
+            intervals.append(f"{start_time} по {end_time}")
 
-        message += f"📅 {datetime.strptime(date, '%Y-%m-%d').strftime('%d-%m-%Y')}: відключення будуть з {', '.join(intervals)}\n"
+        message += f"\n📅 {datetime.strptime(date, '%Y-%m-%d').strftime('%d-%m-%Y')}: відключення будуть з {', '.join(intervals)}\n"
 
     return message

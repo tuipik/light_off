@@ -7,6 +7,8 @@ from typing import Dict, Optional, List
 
 import redis
 
+from logger import logger
+
 
 class ScheduleStorage:
     """Клас для роботи з Redis"""
@@ -52,7 +54,7 @@ class ScheduleStorage:
         }
 
         self.redis.set(key, json.dumps(data_to_save))
-        print(f"💾 Збережено графік для {queue_name}")
+        logger.info(f"💾 Збережено графік для {queue_name}")
 
     def has_changes(self, queue_name: str, new_schedule: Dict) -> bool:
         """
@@ -149,7 +151,7 @@ class ScheduleStorage:
         self.redis.lpush(key, json.dumps(history_entry))
         self.redis.ltrim(key, 0, 99)
 
-        print(f"📚 Збережено в історію для {queue_name}")
+        logger.info(f"📚 Збережено в історію для {queue_name}")
 
     def get_history(self, queue_name: str, limit: int = 10) -> List[Dict]:
         """
@@ -176,7 +178,7 @@ class ScheduleStorage:
         """
         key = f"schedule:{queue_name}"
         self.redis.delete(key)
-        print(f"🗑️  Видалено графік для {queue_name}")
+        logger.info(f"🗑️  Видалено графік для {queue_name}")
 
     def clear_history(self, queue_name: str) -> None:
         """
@@ -187,7 +189,7 @@ class ScheduleStorage:
         """
         key = f"history:{queue_name}"
         self.redis.delete(key)
-        print(f"🗑️  Видалено історію для {queue_name}")
+        logger.info(f"🗑️  Видалено історію для {queue_name}")
 
     def ping(self) -> bool:
         """

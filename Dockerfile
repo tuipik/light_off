@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install Playwright and Python dependencies
 RUN pip install --no-cache-dir playwright
-RUN playwright install --with-deps
+RUN playwright install firefox --with-deps
 
 # Copy the requirements file and install Python dependencies
 COPY requirements.txt .

@@ -16,6 +16,7 @@ from config import (
     CHECK_INTERVAL_MINUTES,
     TIMEZONE, REDIS_HOST, REDIS_PORT, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 )
+from logger import logger
 from senders import send_telegram_message, generate_schedule_message
 from storage import ScheduleStorage
 
@@ -26,13 +27,13 @@ def get_shutdowns_html():
         browser = p.firefox.launch(headless=True)
         page = browser.new_page()
 
-        print(f"🔄 Завантажую {SHUTDOWNS_URL}...")
+        logger.info(f"🔄 Завантажую {SHUTDOWNS_URL}...")
         page.goto(SHUTDOWNS_URL)
 
         content = page.content()
         browser.close()
 
-        print(f"✅ Отримано {len(content)} байт")
+        logger.info(f"✅ Отримано {len(content)} байт")
         return content
 
 
@@ -43,14 +44,14 @@ def extract_schedule_data(html):
         start_match = re.search(start_pattern, html)
 
         if not start_match:
-            print("❌ Не знайдено 'DisconSchedule.fact ='")
+            logger.error("❌ Не знайдено 'DisconSchedule.fact ='")
             return None
 
         start_pos = start_match.end()
         json_str = _extract_balanced_json(html, start_pos)
 
         if not json_str:
-            print("❌ Не вдалося витягнути JSON об'єкт")
+            logger.error("❌ Не вдалося витягнути JSON об'єкт")
             return None
 
         # Очищаємо від коментарів
@@ -60,24 +61,24 @@ def extract_schedule_data(html):
         fact_data = json.loads(json_str)
 
         if 'data' not in fact_data:
-            print("❌ Поле 'data' не знайдено")
+            logger.error("❌ Поле 'data' не знайдено")
             return None
 
         schedule_data = fact_data['data']
-        print(f"✅ Знайдено {len(schedule_data)} дат(и) з графіками")
+        logger.info(f"✅ Знайдено {len(schedule_data)} дат(и) з графіками")
         schedule_data['update'] = ""
 
         if 'update' in fact_data:
             schedule_data['update'] = fact_data['update']
-            print(f"ℹ️  Оновлено на сайті: {fact_data['update']}")
+            logger.info(f"ℹ️  Оновлено на сайті: {fact_data['update']}")
 
         return schedule_data
 
     except json.JSONDecodeError as e:
-        print(f"❌ Помилка парсингу JSON: {e}")
+        logger.error(f"❌ Помилка парсингу JSON: {e}")
         return None
     except Exception as e:
-        print(f"❌ Помилка: {e}")
+        logger.error(f"❌ Помилка: {e}")
         return None
 
 
@@ -178,11 +179,11 @@ def main():
 
     # Перевіряємо підключення
     if not storage.ping():
-        print("❌ Не вдалося підключитися до Redis!")
+        logger.error("❌ Не вдалося підключитися до Redis!")
         print("Запустіть Redis: docker run -d -p 6379:6379 redis")
         return
 
-    print("✅ З'єднання з Redis успішне\n")
+    logger.info("✅ З'єднання з Redis успішне\n")
 
     iteration = 0
 
@@ -199,7 +200,7 @@ def main():
             html = get_shutdowns_html()
 
             if not html:
-                print("❌ Не вдалося отримати HTML")
+                logger.error("❌ Не вдалося отримати HTML")
                 sleep(60)
                 continue
 
@@ -207,7 +208,7 @@ def main():
             raw_data = extract_schedule_data(html)
 
             if not raw_data:
-                print("❌ Не вдалося розпарсити дані")
+                logger.error("❌ Не вдалося розпарсити дані")
                 sleep(60)
                 continue
 
@@ -215,17 +216,17 @@ def main():
             schedule = parse_shutdowns(raw_data, YOUR_QUEUE)
 
             if not schedule:
-                print(f"⚠️  Графік для черги {YOUR_QUEUE} порожній")
+                logger.info(f"⚠️  Графік для черги {YOUR_QUEUE} порожній")
                 sleep(CHECK_INTERVAL_MINUTES * 60)
                 continue
 
-            print(f"\n📊 Графік відключень для {YOUR_QUEUE}:")
+            logger.info(f"\n📊 Графік відключень для {YOUR_QUEUE}:")
             for date, times in schedule.items():
-                print(f"   {date}: {', '.join(times)}")
+                logger.info(f"   {date}: {', '.join(times)}")
 
             # 4. Перевіряємо зміни
             if storage.has_changes(YOUR_QUEUE, schedule):
-                print("\n🔔 ЗНАЙДЕНО ЗМІНИ В ГРАФІКУ!")
+                logger.info("\n🔔 ЗНАЙДЕНО ЗМІНИ В ГРАФІКУ!")
 
                 message = generate_schedule_message(schedule)
                 message += f"\nОстаннє оновлення: {raw_data['update']}"
@@ -238,21 +239,21 @@ def main():
                 storage.save_history(YOUR_QUEUE, schedule)
 
             else:
-                print("\nℹ️  Графік не змінився")
+                logger.info("\nℹ️  Графік не змінився")
 
             # 5. Чекаємо до наступної перевірки
             print(f"\n⏳ Наступна перевірка через {CHECK_INTERVAL_MINUTES} хв...")
             sleep(CHECK_INTERVAL_MINUTES * 60)
 
         except KeyboardInterrupt:
-            print("\n\n⛔ Моніторинг зупинено користувачем")
+            logger.info("\n\n⛔ Моніторинг зупинено користувачем")
             break
 
         except Exception as e:
-            print(f"\n❌ Неочікувана помилка: {e}")
+            logger.error(f"\n❌ Неочікувана помилка: {e}")
             import traceback
             traceback.print_exc()
-            print("\n⏳ Повторна спроба через 1 хвилину...")
+            logger.error("\n⏳ Повторна спроба через 1 хвилину...")
             sleep(60)
 
 
