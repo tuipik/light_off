@@ -273,4 +273,6 @@ pyrightconfig.json
 pyvenv.cfg
 pip-selfcheck.json
 
+.vscode/
+.python-version
 # End of https://www.toptal.com/developers/gitignore/api/python,pycharm+all,venv
