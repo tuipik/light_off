@@ -24,13 +24,14 @@ async def send_telegram_message(token, chat_id, message):
 
 def generate_schedule_message(schedule: dict) -> str:
     """
-        Генерує повідомлення про відключення світла на основі графіка,
-        з логікою групування послідовних точок відключення.
+    Генерує повідомлення про відключення світла на основі графіка,
+    з логікою групування послідовних точок відключення та коректним
+    визначенням кінцевого часу (додавання +1 години для кінцівки о :00).
 
-        :param schedule: Словник, де ключ - дата (str 'YYYY-MM-DD'),
-                         значення - список часів відключень (list[str 'HH:MM']).
-        :return: Сформоване повідомлення (str).
-        """
+    :param schedule: Словник, де ключ - дата (str 'YYYY-MM-DD'),
+                     значення - список часів відключень (list[str 'H:MM' або 'HH:MM']).
+    :return: Сформоване повідомлення (str).
+    """
     messages = ["🔔 Новий графік відключень\n"]
 
     # Максимальна допустима різниця між послідовними часами для групування
@@ -48,13 +49,14 @@ def generate_schedule_message(schedule: dict) -> str:
             continue
 
         # 2. Перетворення рядків часу на об'єкти datetime
+        # Використовуємо %H для гнучкого парсингу H:MM або HH:MM
         dt_times = [datetime.strptime(f"{date_str} {t}", '%Y-%m-%d %H:%M') for t in times]
 
         grouped_intervals = []
 
         # Ініціалізація першої групи
         current_start_dt = dt_times[0]
-        current_end_dt = dt_times[0]  # Початковий кінець - це перший час
+        current_end_dt = dt_times[0]
 
         for i in range(1, len(dt_times)):
             time_diff = dt_times[i] - current_end_dt
@@ -67,12 +69,14 @@ def generate_schedule_message(schedule: dict) -> str:
             else:
                 # Послідовність перервалася, записуємо попередній інтервал
 
-                # Обчислюємо кінцевий час для поточної групи
+                # ************ ОНОВЛЕНА ЛОГІКА ************
                 final_end_dt = current_end_dt
 
-                # Якщо група складається з одного часу, додаємо 1 годину
-                if current_start_dt == current_end_dt:
+                # Якщо кінцевий час на цілій годині (наприклад, 21:00), додаємо 1 годину
+                # відповідно до правила "21:00 - це початок відключення, яке триває до 22:00"
+                if final_end_dt.minute == 0:
                     final_end_dt += timedelta(hours=1)
+                # ******************************************
 
                 # Додавання інтервалу
                 start_str = current_start_dt.strftime('%H:%M')
@@ -81,14 +85,17 @@ def generate_schedule_message(schedule: dict) -> str:
 
                 # Починаємо нову послідовність
                 current_start_dt = dt_times[i]
-                current_end_dt = dt_times[i]  # Початок нової групи
+                current_end_dt = dt_times[i]
 
         # 3. Запис останньої (або єдиної) послідовності
+
+        # ************ ОНОВЛЕНА ЛОГІКА ************
         final_end_dt = current_end_dt
 
-        if current_start_dt == current_end_dt:
-            # Обробка останнього одиночного часу
+        # Якщо кінцевий час на цілій годині (наприклад, 21:00), додаємо 1 годину
+        if final_end_dt.minute == 0:
             final_end_dt += timedelta(hours=1)
+        # ******************************************
 
         start_str = current_start_dt.strftime('%H:%M')
         end_str = final_end_dt.strftime('%H:%M')
