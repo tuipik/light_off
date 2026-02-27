@@ -7,6 +7,7 @@ import pytest
 
 from config import REDIS_PORT, REDIS_HOST
 from main import parse_shutdowns, _extract_balanced_json
+from senders import generate_schedule_message
 from storage import ScheduleStorage
 
 
@@ -230,7 +231,7 @@ class TestParser:
         first_date = list(result.keys())[0]
         times = result[first_date]
 
-        assert '7:30' in times
+        assert '7:00' in times
 
     def test_parse_shutdowns_second_status(self, sample_raw_data):
         """Тест парсингу статусу 'second' (відключення з :30)"""
@@ -274,6 +275,30 @@ class TestParser:
         # Перевіряємо що список відсортовано
         sorted_times = sorted(times, key=lambda t: tuple(map(int, t.split(':'))))
         assert times == sorted_times
+
+    def test_parse_shutdowns_real_case_intervals(self):
+        """Тест реального кейсу GPV3.2 з розривами між інтервалами"""
+        raw_data = {
+            "1772143200": {
+                "GPV3.2": {
+                    "1": "second", "2": "no", "3": "no", "4": "no",
+                    "5": "yes", "6": "yes", "7": "yes", "8": "yes",
+                    "9": "yes", "10": "yes", "11": "yes", "12": "no",
+                    "13": "no", "14": "no", "15": "first", "16": "yes",
+                    "17": "no", "18": "no", "19": "yes", "20": "yes",
+                    "21": "yes", "22": "second", "23": "no", "24": "no"
+                }
+            }
+        }
+
+        schedule = parse_shutdowns(raw_data, 'GPV3.2')
+        first_date = list(schedule.keys())[0]
+        message = generate_schedule_message({first_date: schedule[first_date]})
+
+        assert "з 00:30 по 04:00" in message
+        assert "з 11:00 по 14:30" in message
+        assert "з 16:00 по 18:00" in message
+        assert "з 21:30 по 00:00" in message
 
 
 # ============= ТЕСТИ EXTRACT JSON =============

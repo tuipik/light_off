@@ -66,13 +66,16 @@ def extract_schedule_data(html):
 
         schedule_data = fact_data['data']
         logger.info(f"✅ Знайдено {len(schedule_data)} дат(и) з графіками")
-        schedule_data['update'] = ""
 
-        if 'update' in fact_data:
-            schedule_data['update'] = fact_data['update']
-            logger.info(f"ℹ️  Оновлено на сайті: {fact_data['update']}")
+        update = fact_data.get('update', "")
+        if update:
+            logger.info(f"ℹ️  Оновлено на сайті: {update}")
 
-        return schedule_data
+        return {
+            'data': schedule_data,
+            'update': update,
+            'today': fact_data.get('today')
+        }
 
     except json.JSONDecodeError as e:
         logger.error(f"❌ Помилка парсингу JSON: {e}")
@@ -137,6 +140,9 @@ def parse_shutdowns(data, queue_name):
     for utc_timestamp, groups in data.items():
         # Конвертуємо timestamp в локальну дату
         try:
+            if not str(utc_timestamp).isdigit():
+                continue
+
             utc_date = datetime.fromtimestamp(int(utc_timestamp), tz=timezone.utc)
             local_date = utc_date.astimezone(tz).strftime('%Y-%m-%d')
 
@@ -144,21 +150,31 @@ def parse_shutdowns(data, queue_name):
                 continue
 
             hours = groups[queue_name]
-            shutdown_times = []
+            # Представляємо відключення як 30-хвилинні слоти (час початку слоту)
+            half_hour_slots = []
 
             for hour, status in hours.items():
                 hour_int = int(hour)
+                if hour_int < 1 or hour_int > 24:
+                    continue
 
-                # "no" = відключення всю годину
+                hour_start_minutes = (hour_int - 1) * 60
+
+                # yes: світло є увесь слот
+                # first: відключення у першій половині години (XX:00-XX:30)
+                # second: відключення у другій половині години (XX:30-XX+1:00)
+                # no: відключення увесь слот (дві половини)
                 if status == "no":
-                    shutdown_times.append(f"{hour_int - 1}:00")
-
-                elif status in ["first", "second"]:
-                    shutdown_times.append(f"{hour_int - 1}:30")
+                    half_hour_slots.extend([hour_start_minutes, hour_start_minutes + 30])
+                elif status == "first":
+                    half_hour_slots.append(hour_start_minutes)
+                elif status == "second":
+                    half_hour_slots.append(hour_start_minutes + 30)
         except ValueError:
             continue
 
-        result[local_date] = sorted(shutdown_times, key=lambda t: tuple(map(int, t.split(':'))))
+        unique_sorted_slots = sorted(set(half_hour_slots))
+        result[local_date] = [f"{slot // 60}:{slot % 60:02d}" for slot in unique_sorted_slots]
 
     return result
 
@@ -205,12 +221,14 @@ def main():
                 continue
 
             # 2. Парсимо дані
-            raw_data = extract_schedule_data(html)
+            payload = extract_schedule_data(html)
 
-            if not raw_data:
+            if not payload:
                 logger.error("❌ Не вдалося розпарсити дані")
                 sleep(60)
                 continue
+
+            raw_data = payload['data']
 
             # 3. Обробляємо графік для нашої черги
             schedule = parse_shutdowns(raw_data, YOUR_QUEUE)
@@ -229,7 +247,8 @@ def main():
                 logger.info("\n🔔 ЗНАЙДЕНО ЗМІНИ В ГРАФІКУ!")
 
                 message = generate_schedule_message(schedule)
-                message += f"\nОстаннє оновлення: {raw_data['update']}"
+                if payload.get('update'):
+                    message += f"\nОстаннє оновлення: {payload['update']}"
 
                 # Відправляємо повідомлення
                 asyncio.run(send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, message))
