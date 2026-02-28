@@ -4,10 +4,11 @@
 import json
 
 import pytest
+import fakeredis
 
 from config import REDIS_PORT, REDIS_HOST
 from main import parse_shutdowns, _extract_balanced_json
-from senders import generate_schedule_message
+from senders import generate_schedule_message, calculate_total_outage_hours
 from storage import ScheduleStorage
 
 
@@ -17,6 +18,9 @@ from storage import ScheduleStorage
 def redis_storage():
     """Фікстура для тестового Redis storage"""
     storage = ScheduleStorage(f'redis://{REDIS_HOST}:{REDIS_PORT}/1')  # Використовуємо DB 1 для тестів
+
+    if not storage.ping():
+        storage.redis = fakeredis.FakeRedis(decode_responses=True)
 
     # Очищаємо перед тестом
     storage.clear_schedule('TEST_QUEUE')
@@ -299,6 +303,21 @@ class TestParser:
         assert "з 11:00 по 14:30" in message
         assert "з 16:00 по 18:00" in message
         assert "з 21:30 по 00:00" in message
+
+
+# ============= ТЕСТИ ПОВІДОМЛЕНЬ =============
+
+class TestMessages:
+    """Тести для формування повідомлень"""
+
+    def test_total_outage_hours_in_message(self):
+        """Тест підрахунку загальних годин без світла в повідомленні"""
+        schedule = {'2024-11-23': ['0:00', '0:30', '1:00']}  # 3 слоти = 1.5 год
+        total_hours = calculate_total_outage_hours(schedule['2024-11-23'])
+        assert total_hours == 1.5
+
+        message = generate_schedule_message(schedule)
+        assert "Без світла: 1 год 30 хв" in message
 
 
 # ============= ТЕСТИ EXTRACT JSON =============

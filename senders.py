@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from typing import Dict, List
 
 from telegram import Bot
 
@@ -22,7 +23,23 @@ async def send_telegram_message(token, chat_id, message):
         logger.error(f"❌ Помилка відправки повідомлення в Telegram: {e}")
 
 
-def generate_schedule_message(schedule: dict) -> str:
+def calculate_total_outage_hours(times: List[str]) -> float:
+    """
+    Підраховує кількість годин без світла для однієї дати.
+
+    Кожен елемент у списку часу — це початок 30-хвилинного слоту.
+    Тому загальна кількість годин = (кількість унікальних слотів) * 0.5
+    """
+    return len(set(times)) * 0.5
+
+
+def _format_hours_and_minutes(total_minutes: int) -> str:
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    return f"{hours} год {minutes} хв"
+
+
+def generate_schedule_message(schedule: Dict[str, List[str]]) -> str:
     """
     Генерує повідомлення про відключення світла на основі графіка,
     з логікою групування послідовних точок відключення та коректним
@@ -64,7 +81,7 @@ def generate_schedule_message(schedule: dict) -> str:
                 final_end_dt = current_end_dt + timedelta(minutes=30)
                 start_str = current_start_dt.strftime('%H:%M')
                 end_str = final_end_dt.strftime('%H:%M')
-                grouped_intervals.append(f"з {start_str} по {end_str}")
+                grouped_intervals.append(f"      з {start_str} по {end_str}")
 
                 # Починаємо нову послідовність
                 current_start_dt = dt_times[i]
@@ -75,10 +92,14 @@ def generate_schedule_message(schedule: dict) -> str:
 
         start_str = current_start_dt.strftime('%H:%M')
         end_str = final_end_dt.strftime('%H:%M')
-        grouped_intervals.append(f"з {start_str} по {end_str}")
+        grouped_intervals.append(f"      з {start_str} по {end_str}")
 
         # 4. Формування фінального блоку для дати: кожен інтервал з нового рядка
         intervals_str = "\n".join(grouped_intervals)
-        messages.append(f"📅 {display_date} відключення будуть:\n{intervals_str}\n")
+        total_minutes = len(set(times)) * 30
+        messages.append(
+            f"📅 {display_date} відключення будуть:\n{intervals_str}\n\n"
+            f"⏱️ Без світла: {_format_hours_and_minutes(total_minutes)}\n"
+        )
 
     return "\n".join(messages)
