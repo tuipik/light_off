@@ -11,6 +11,8 @@ RUN apt-get update \
         ca-certificates \
         wget \
         curl \
+        xvfb \
+        xauth \
         libnss3 \
         libatk1.0-0 \
         libatk-bridge2.0-0 \
@@ -32,7 +34,7 @@ COPY requirements.txt .
 
 # Встановлюємо python-залежності й playwright в одному шарі (без кешу)
 RUN pip install --no-cache-dir -r requirements.txt playwright \
-    && playwright install firefox
+    && playwright install chromium
 
 # Копіюємо код додатку (docker-compose монтує volume у dev, а в image -- копія)
 COPY . .
@@ -40,4 +42,6 @@ COPY . .
 # Менше шарів, очищення зайвих файлів (якщо з'явились)
 RUN rm -rf /root/.cache/pip
 
-CMD ["python", "main.py"]
+RUN chmod +x /app/start.sh
+
+CMD ["/app/start.sh"]

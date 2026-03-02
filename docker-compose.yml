@@ -22,7 +22,20 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - TIMEZONE=${TIMEZONE:-Europe/Kyiv}
-    command: python main.py
+      - PLAYWRIGHT_BROWSER=${PLAYWRIGHT_BROWSER:-chromium}
+      - PLAYWRIGHT_PROFILE_DIR=/app/pw_profile
+      - PLAYWRIGHT_HEADLESS=${PLAYWRIGHT_HEADLESS:-1}
+      - PLAYWRIGHT_USER_AGENT=${PLAYWRIGHT_USER_AGENT}
+      - AUTO_HEADFUL_ON_BLOCK=${AUTO_HEADFUL_ON_BLOCK:-1}
+      - MAX_BACKOFF_MINUTES=${MAX_BACKOFF_MINUTES:-60}
+      - MIN_BLOCK_BACKOFF_MINUTES=${MIN_BLOCK_BACKOFF_MINUTES:-60}
+      - PLAYWRIGHT_GOTO_TIMEOUT_MS=${PLAYWRIGHT_GOTO_TIMEOUT_MS:-60000}
+      - HTTP_TIMEOUT_SECONDS=${HTTP_TIMEOUT_SECONDS:-20}
+      - DTEK_COOKIE=${DTEK_COOKIE}
+    command: /app/start.sh
+    volumes:
+      - pw_profile:/app/pw_profile
 
 volumes:
   redis_data:
+  pw_profile:

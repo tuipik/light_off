@@ -9,7 +9,7 @@
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-playwright install firefox
+playwright install chromium
 ```
 
 2. Запустіть Redis локально або в Docker:
@@ -44,7 +44,34 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
+**Перший запуск (Incapsula + без дисплея)**
+
+1. Разовий старт у headful через `xvfb`:
+```bash
+PLAYWRIGHT_HEADLESS=0 docker compose up -d --build
+```
+
+2. Зачекайте 1–2 хвилини, щоб профіль з cookies зберігся.
+3. Поверніть headless:
+```bash
+PLAYWRIGHT_HEADLESS=1 docker compose up -d
+```
+
+**Якщо сайт вимагає “поставити галочку, що я людина”**
+
+У такому випадку Incapsula не пропускає автоматичні запити. Найпростіший варіант:
+1. Відкрити сайт у звичайному браузері, пройти перевірку.
+2. Скопіювати cookies `visid_incap_*` і `incap_ses_*` для домену `www.dtek-krem.com.ua`.
+3. Додати їх у `.env` як одну стрічку:
+```
+DTEK_COOKIE=visid_incap_...; incap_ses_...=...
+```
+4. Перезапустити контейнер.
+
 **Примітки**
 
 - За замовчуванням Redis для консолі очікується на `localhost:6379`. Якщо ви підняли Redis на іншому порту, задайте `REDIS_PORT`.
 - У Docker Redis зберігає дані у volume `redis_data`.
+- Для обходу Incapsula потрібно один раз пройти перевірку в браузері з профілем. Профіль зберігається у volume `pw_profile`.
+- Якщо Incapsula блокує, запустіть контейнер разово з `PLAYWRIGHT_HEADLESS=0` — в Docker використовується `xvfb`, тому дисплей не потрібен. Після проходження перевірки поверніть `PLAYWRIGHT_HEADLESS=1`.
+- Доступні параметри керування повторними спробами: `AUTO_HEADFUL_ON_BLOCK=1` (разова спроба headful при блокуванні), `MAX_BACKOFF_MINUTES=60` (максимальний інтервал між спробами), `MIN_BLOCK_BACKOFF_MINUTES=60` (мінімальна пауза при блокуванні), `PLAYWRIGHT_GOTO_TIMEOUT_MS=60000` (таймаут завантаження сторінки) і `HTTP_TIMEOUT_SECONDS=20` (таймаут HTTP-запиту без браузера).
