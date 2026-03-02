@@ -8,33 +8,152 @@ from datetime import datetime, timezone
 from time import sleep
 
 import pytz
-from playwright.sync_api import sync_playwright
+import requests
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 from config import (
     SHUTDOWNS_URL,
     YOUR_QUEUE,
     CHECK_INTERVAL_MINUTES,
-    TIMEZONE, REDIS_HOST, REDIS_PORT, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+    TIMEZONE, REDIS_HOST, REDIS_PORT, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
+    PLAYWRIGHT_BROWSER, PLAYWRIGHT_PROFILE_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_USER_AGENT,
+    AUTO_HEADFUL_ON_BLOCK, ENABLE_HTTP_PREFETCH, MAX_BACKOFF_MINUTES, MIN_BLOCK_BACKOFF_MINUTES,
+    BLOCK_ALERT_COOLDOWN_MINUTES,
+    PLAYWRIGHT_GOTO_TIMEOUT_MS, HTTP_TIMEOUT_SECONDS, DTEK_COOKIE
 )
 from logger import logger
 from senders import send_telegram_message, generate_schedule_message
 from storage import ScheduleStorage
 
 
-def get_shutdowns_html():
+def _looks_like_blocked_page(content: str) -> bool:
+    return "Incapsula incident ID" in content or "_Incapsula_Resource" in content
+
+
+def _calculate_backoff_seconds(error_count: int) -> int:
+    # Exponential backoff with cap, but never faster than the normal interval.
+    base = 60
+    max_backoff = max(1, MAX_BACKOFF_MINUTES) * 60
+    backoff = min(base * (2 ** (error_count - 1)), max_backoff)
+    return max(backoff, CHECK_INTERVAL_MINUTES * 60)
+
+
+def _http_fetch_shutdowns():
+    headers = {}
+    if PLAYWRIGHT_USER_AGENT:
+        headers["User-Agent"] = PLAYWRIGHT_USER_AGENT
+    if DTEK_COOKIE:
+        headers["Cookie"] = DTEK_COOKIE
+
+    try:
+        resp = requests.get(
+            SHUTDOWNS_URL,
+            headers=headers,
+            timeout=HTTP_TIMEOUT_SECONDS,
+            allow_redirects=True,
+        )
+    except requests.RequestException as e:
+        logger.warning(f"⚠️ HTTP fetch error: {e}")
+        return None, "error"
+
+    content = resp.text
+    if _looks_like_blocked_page(content):
+        logger.warning("⚠️ HTTP fetch отримав Incapsula challenge.")
+        return None, "blocked"
+
+    if "DisconSchedule.fact" in content:
+        logger.info("✅ HTML отримано через HTTP без браузера")
+        return content, "ok"
+
+    return None, "error"
+
+
+def get_shutdowns_html(force_headful: bool = False):
     """Отримує HTML сторінки через Playwright"""
+    if ENABLE_HTTP_PREFETCH:
+        http_content, http_status = _http_fetch_shutdowns()
+        if http_status == "ok":
+            return http_content, "ok"
+
     with sync_playwright() as p:
-        browser = p.firefox.launch(headless=True)
-        page = browser.new_page()
+        browser_type = getattr(p, PLAYWRIGHT_BROWSER, p.chromium)
+        context = browser_type.launch_persistent_context(
+            PLAYWRIGHT_PROFILE_DIR,
+            headless=PLAYWRIGHT_HEADLESS if not force_headful else False,
+            viewport={"width": 1280, "height": 720},
+            locale="uk-UA",
+            timezone_id=TIMEZONE,
+        )
 
-        logger.info(f"🔄 Завантажую {SHUTDOWNS_URL}...")
-        page.goto(SHUTDOWNS_URL)
+        try:
+            if DTEK_COOKIE:
+                cookies = []
+                for part in DTEK_COOKIE.split(";"):
+                    part = part.strip()
+                    if not part or "=" not in part:
+                        continue
+                    name, value = part.split("=", 1)
+                    cookies.append(
+                        {
+                            "name": name.strip(),
+                            "value": value.strip(),
+                            "domain": "www.dtek-krem.com.ua",
+                            "path": "/",
+                        }
+                    )
+                if cookies:
+                    logger.info(f"🍪 Передаю cookies у browser context: {len(cookies)} шт.")
+                    context.add_cookies(cookies)
+            page = context.new_page()
+            if PLAYWRIGHT_USER_AGENT:
+                logger.info("🧭 Використовую кастомний User-Agent для Playwright.")
+                page.set_extra_http_headers({"User-Agent": PLAYWRIGHT_USER_AGENT})
+            page.set_default_navigation_timeout(PLAYWRIGHT_GOTO_TIMEOUT_MS)
 
-        content = page.content()
-        browser.close()
+            logger.info(f"🔄 Завантажую {SHUTDOWNS_URL}...")
+            try:
+                page.goto(SHUTDOWNS_URL, wait_until="domcontentloaded", timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                logger.warning(f"⚠️ Timeout {PLAYWRIGHT_GOTO_TIMEOUT_MS}ms при завантаженні, пробую взяти content.")
+            except PlaywrightError as e:
+                logger.error(f"❌ Помилка завантаження сторінки: {e}")
+                return None, "error"
 
-        logger.info(f"✅ Отримано {len(content)} байт")
-        return content
+            page.wait_for_timeout(3000)
+            try:
+                page.wait_for_function(
+                    "() => document.body && document.body.innerText.includes('DisconSchedule.fact')",
+                    timeout=20000
+                )
+            except Exception:
+                pass
+
+            try:
+                content = page.content()
+            except PlaywrightError as e:
+                logger.error(f"❌ Не вдалося прочитати content сторінки: {e}")
+                return None, "error"
+
+            if _looks_like_blocked_page(content):
+                logger.error("❌ Сайт повернув Incapsula challenge.")
+                # Give the JS challenge a chance to set cookies, then retry once in the same context.
+                logger.info("⏳ Очікую 15с і роблю повторний запит у тому ж контексті...")
+                page.wait_for_timeout(15000)
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS)
+                    page.wait_for_timeout(3000)
+                    content = page.content()
+                except PlaywrightError as e:
+                    logger.error(f"❌ Retry після challenge завершився помилкою: {e}")
+                    return None, "blocked"
+
+                if _looks_like_blocked_page(content):
+                    return None, "blocked"
+
+            logger.info(f"✅ Отримано {len(content)} байт")
+            return content, "ok"
+        finally:
+            context.close()
 
 
 def extract_schedule_data(html):
@@ -188,6 +307,20 @@ def main():
     print(f"⏱️  Інтервал: {CHECK_INTERVAL_MINUTES} хв")
     print(f"💾 Redis: redis://{REDIS_HOST}:{REDIS_PORT}/0")
     print("=" * 60)
+    print(f"🌐 Browser: {PLAYWRIGHT_BROWSER} | headless: {PLAYWRIGHT_HEADLESS}")
+    print(
+        f"⏳ Backoff: max={MAX_BACKOFF_MINUTES} хв | "
+        f"min_block={MIN_BLOCK_BACKOFF_MINUTES} хв | "
+        f"auto_headful_on_block={AUTO_HEADFUL_ON_BLOCK}"
+    )
+    print(
+        f"🔐 HTTP prefetch: {ENABLE_HTTP_PREFETCH} | "
+        f"block_alert_cooldown={BLOCK_ALERT_COOLDOWN_MINUTES} хв"
+    )
+    print(
+        f"🍪 DTEK_COOKIE: {'set' if bool(DTEK_COOKIE) else 'empty'} | "
+        f"UA: {'set' if bool(PLAYWRIGHT_USER_AGENT) else 'empty'}"
+    )
     print()
 
     # Ініціалізуємо Redis
@@ -202,6 +335,10 @@ def main():
     logger.info("✅ З'єднання з Redis успішне\n")
 
     iteration = 0
+    error_count = 0
+    block_count = 0
+    attempted_headful = False
+    last_block_alert_ts = None
 
     while True:
         try:
@@ -213,11 +350,50 @@ def main():
             print(f"{'=' * 60}")
 
             # 1. Отримуємо HTML
-            html = get_shutdowns_html()
+            force_headful = AUTO_HEADFUL_ON_BLOCK and not attempted_headful and block_count > 0
+            if force_headful:
+                logger.warning("⚠️ Спроба headful-режиму через xvfb для проходження Incapsula.")
+            html, status = get_shutdowns_html(force_headful=force_headful)
+            if force_headful:
+                attempted_headful = True
 
             if not html:
-                logger.error("❌ Не вдалося отримати HTML")
-                sleep(60)
+                error_count += 1
+                if status == "blocked":
+                    if AUTO_HEADFUL_ON_BLOCK:
+                        block_count += 1
+                    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+                        now_ts = datetime.now().timestamp()
+                        cooldown_sec = max(1, BLOCK_ALERT_COOLDOWN_MINUTES) * 60
+                        should_send_alert = (
+                            last_block_alert_ts is None or (now_ts - last_block_alert_ts) >= cooldown_sec
+                        )
+                        if should_send_alert:
+                            try:
+                                asyncio.run(
+                                    send_telegram_message(
+                                        TELEGRAM_TOKEN,
+                                        TELEGRAM_CHAT_ID,
+                                        "⚠️ Сайт вимагає перевірку людини (Incapsula). "
+                                        "Потрібно оновити cookies або пройти перевірку вручну.",
+                                    )
+                                )
+                                last_block_alert_ts = now_ts
+                            except Exception:
+                                pass
+                        else:
+                            remaining_min = int((cooldown_sec - (now_ts - last_block_alert_ts)) // 60)
+                            logger.info(f"ℹ️ Alert про блок вже надіслано, повтор через ~{remaining_min} хв.")
+                    wait_seconds = max(_calculate_backoff_seconds(error_count), MIN_BLOCK_BACKOFF_MINUTES * 60)
+                    logger.error(
+                        f"⛔ Заблоковано Incapsula, спроба №{error_count}, наступна через {wait_seconds // 60} хв"
+                    )
+                else:
+                    wait_seconds = _calculate_backoff_seconds(error_count)
+                    logger.error(
+                        f"⚠️ Помилка завантаження, спроба №{error_count}, наступна через {wait_seconds // 60} хв"
+                    )
+                sleep(wait_seconds)
                 continue
 
             # 2. Парсимо дані
@@ -225,7 +401,12 @@ def main():
 
             if not payload:
                 logger.error("❌ Не вдалося розпарсити дані")
-                sleep(60)
+                error_count += 1
+                wait_seconds = _calculate_backoff_seconds(error_count)
+                logger.error(
+                    f"⚠️ Помилка парсингу, спроба №{error_count}, наступна через {wait_seconds // 60} хв"
+                )
+                sleep(wait_seconds)
                 continue
 
             raw_data = payload['data']
@@ -235,6 +416,7 @@ def main():
 
             if not schedule:
                 logger.info(f"⚠️  Графік для черги {YOUR_QUEUE} порожній")
+                error_count = 0
                 sleep(CHECK_INTERVAL_MINUTES * 60)
                 continue
 
@@ -262,6 +444,9 @@ def main():
 
             # 5. Чекаємо до наступної перевірки
             print(f"\n⏳ Наступна перевірка через {CHECK_INTERVAL_MINUTES} хв...")
+            error_count = 0
+            block_count = 0
+            attempted_headful = False
             sleep(CHECK_INTERVAL_MINUTES * 60)
 
         except KeyboardInterrupt:
@@ -272,8 +457,10 @@ def main():
             logger.error(f"\n❌ Неочікувана помилка: {e}")
             import traceback
             traceback.print_exc()
-            logger.error("\n⏳ Повторна спроба через 1 хвилину...")
-            sleep(60)
+            error_count += 1
+            wait_seconds = _calculate_backoff_seconds(error_count)
+            logger.error(f"\n⏳ Повторна спроба через {wait_seconds // 60} хвилин...")
+            sleep(wait_seconds)
 
 
 if __name__ == "__main__":
