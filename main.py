@@ -17,7 +17,8 @@ from config import (
     CHECK_INTERVAL_MINUTES,
     TIMEZONE, REDIS_HOST, REDIS_PORT, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
     PLAYWRIGHT_BROWSER, PLAYWRIGHT_PROFILE_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_USER_AGENT,
-    AUTO_HEADFUL_ON_BLOCK, MAX_BACKOFF_MINUTES, MIN_BLOCK_BACKOFF_MINUTES,
+    AUTO_HEADFUL_ON_BLOCK, ENABLE_HTTP_PREFETCH, MAX_BACKOFF_MINUTES, MIN_BLOCK_BACKOFF_MINUTES,
+    BLOCK_ALERT_COOLDOWN_MINUTES,
     PLAYWRIGHT_GOTO_TIMEOUT_MS, HTTP_TIMEOUT_SECONDS, DTEK_COOKIE
 )
 from logger import logger
@@ -69,9 +70,10 @@ def _http_fetch_shutdowns():
 
 def get_shutdowns_html(force_headful: bool = False):
     """Отримує HTML сторінки через Playwright"""
-    http_content, http_status = _http_fetch_shutdowns()
-    if http_status == "ok":
-        return http_content, "ok"
+    if ENABLE_HTTP_PREFETCH:
+        http_content, http_status = _http_fetch_shutdowns()
+        if http_status == "ok":
+            return http_content, "ok"
 
     with sync_playwright() as p:
         browser_type = getattr(p, PLAYWRIGHT_BROWSER, p.chromium)
@@ -82,64 +84,76 @@ def get_shutdowns_html(force_headful: bool = False):
             locale="uk-UA",
             timezone_id=TIMEZONE,
         )
-        if DTEK_COOKIE:
-            cookies = []
-            for part in DTEK_COOKIE.split(";"):
-                part = part.strip()
-                if not part or "=" not in part:
-                    continue
-                name, value = part.split("=", 1)
-                cookies.append(
-                    {
-                        "name": name.strip(),
-                        "value": value.strip(),
-                        "domain": "www.dtek-krem.com.ua",
-                        "path": "/",
-                    }
+
+        try:
+            if DTEK_COOKIE:
+                cookies = []
+                for part in DTEK_COOKIE.split(";"):
+                    part = part.strip()
+                    if not part or "=" not in part:
+                        continue
+                    name, value = part.split("=", 1)
+                    cookies.append(
+                        {
+                            "name": name.strip(),
+                            "value": value.strip(),
+                            "domain": "www.dtek-krem.com.ua",
+                            "path": "/",
+                        }
+                    )
+                if cookies:
+                    logger.info(f"🍪 Передаю cookies у browser context: {len(cookies)} шт.")
+                    context.add_cookies(cookies)
+            page = context.new_page()
+            if PLAYWRIGHT_USER_AGENT:
+                logger.info("🧭 Використовую кастомний User-Agent для Playwright.")
+                page.set_extra_http_headers({"User-Agent": PLAYWRIGHT_USER_AGENT})
+            page.set_default_navigation_timeout(PLAYWRIGHT_GOTO_TIMEOUT_MS)
+
+            logger.info(f"🔄 Завантажую {SHUTDOWNS_URL}...")
+            try:
+                page.goto(SHUTDOWNS_URL, wait_until="domcontentloaded", timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                logger.warning(f"⚠️ Timeout {PLAYWRIGHT_GOTO_TIMEOUT_MS}ms при завантаженні, пробую взяти content.")
+            except PlaywrightError as e:
+                logger.error(f"❌ Помилка завантаження сторінки: {e}")
+                return None, "error"
+
+            page.wait_for_timeout(3000)
+            try:
+                page.wait_for_function(
+                    "() => document.body && document.body.innerText.includes('DisconSchedule.fact')",
+                    timeout=20000
                 )
-            if cookies:
-                context.add_cookies(cookies)
-        page = context.new_page()
-        if PLAYWRIGHT_USER_AGENT:
-            page.set_extra_http_headers({"User-Agent": PLAYWRIGHT_USER_AGENT})
-        page.set_default_navigation_timeout(PLAYWRIGHT_GOTO_TIMEOUT_MS)
-
-        logger.info(f"🔄 Завантажую {SHUTDOWNS_URL}...")
-        try:
-            page.goto(SHUTDOWNS_URL, wait_until="domcontentloaded", timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS)
-        except PlaywrightTimeoutError:
-            logger.warning(f"⚠️ Timeout {PLAYWRIGHT_GOTO_TIMEOUT_MS}ms при завантаженні, пробую взяти content.")
-        except PlaywrightError as e:
-            logger.error(f"❌ Помилка завантаження сторінки: {e}")
-            context.close()
-            return None, "error"
-        page.wait_for_timeout(3000)
-        try:
-            page.wait_for_function("() => document.body && document.body.innerText.includes('DisconSchedule.fact')", timeout=20000)
-        except Exception:
-            pass
-
-        content = page.content()
-        context.close()
-
-        if _looks_like_blocked_page(content):
-            logger.error("❌ Сайт повернув Incapsula challenge.")
-            # Give the JS challenge a chance to set cookies, then retry once.
-            logger.info("⏳ Очікую 15с і роблю повторний запит у тому ж контексті...")
-            try:
-                page.wait_for_timeout(15000)
             except Exception:
                 pass
+
             try:
-                page.reload(wait_until="domcontentloaded", timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS)
-            except Exception:
-                pass
-            content = page.content()
+                content = page.content()
+            except PlaywrightError as e:
+                logger.error(f"❌ Не вдалося прочитати content сторінки: {e}")
+                return None, "error"
+
             if _looks_like_blocked_page(content):
-                return None, "blocked"
+                logger.error("❌ Сайт повернув Incapsula challenge.")
+                # Give the JS challenge a chance to set cookies, then retry once in the same context.
+                logger.info("⏳ Очікую 15с і роблю повторний запит у тому ж контексті...")
+                page.wait_for_timeout(15000)
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS)
+                    page.wait_for_timeout(3000)
+                    content = page.content()
+                except PlaywrightError as e:
+                    logger.error(f"❌ Retry після challenge завершився помилкою: {e}")
+                    return None, "blocked"
 
-        logger.info(f"✅ Отримано {len(content)} байт")
-        return content, "ok"
+                if _looks_like_blocked_page(content):
+                    return None, "blocked"
+
+            logger.info(f"✅ Отримано {len(content)} байт")
+            return content, "ok"
+        finally:
+            context.close()
 
 
 def extract_schedule_data(html):
@@ -299,6 +313,14 @@ def main():
         f"min_block={MIN_BLOCK_BACKOFF_MINUTES} хв | "
         f"auto_headful_on_block={AUTO_HEADFUL_ON_BLOCK}"
     )
+    print(
+        f"🔐 HTTP prefetch: {ENABLE_HTTP_PREFETCH} | "
+        f"block_alert_cooldown={BLOCK_ALERT_COOLDOWN_MINUTES} хв"
+    )
+    print(
+        f"🍪 DTEK_COOKIE: {'set' if bool(DTEK_COOKIE) else 'empty'} | "
+        f"UA: {'set' if bool(PLAYWRIGHT_USER_AGENT) else 'empty'}"
+    )
     print()
 
     # Ініціалізуємо Redis
@@ -316,6 +338,7 @@ def main():
     error_count = 0
     block_count = 0
     attempted_headful = False
+    last_block_alert_ts = None
 
     while True:
         try:
@@ -340,17 +363,27 @@ def main():
                     if AUTO_HEADFUL_ON_BLOCK:
                         block_count += 1
                     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-                        try:
-                            asyncio.run(
-                                send_telegram_message(
-                                    TELEGRAM_TOKEN,
-                                    TELEGRAM_CHAT_ID,
-                                    "⚠️ Сайт вимагає перевірку людини (Incapsula). "
-                                    "Потрібно оновити cookies або пройти перевірку вручну.",
+                        now_ts = datetime.now().timestamp()
+                        cooldown_sec = max(1, BLOCK_ALERT_COOLDOWN_MINUTES) * 60
+                        should_send_alert = (
+                            last_block_alert_ts is None or (now_ts - last_block_alert_ts) >= cooldown_sec
+                        )
+                        if should_send_alert:
+                            try:
+                                asyncio.run(
+                                    send_telegram_message(
+                                        TELEGRAM_TOKEN,
+                                        TELEGRAM_CHAT_ID,
+                                        "⚠️ Сайт вимагає перевірку людини (Incapsula). "
+                                        "Потрібно оновити cookies або пройти перевірку вручну.",
+                                    )
                                 )
-                            )
-                        except Exception:
-                            pass
+                                last_block_alert_ts = now_ts
+                            except Exception:
+                                pass
+                        else:
+                            remaining_min = int((cooldown_sec - (now_ts - last_block_alert_ts)) // 60)
+                            logger.info(f"ℹ️ Alert про блок вже надіслано, повтор через ~{remaining_min} хв.")
                     wait_seconds = max(_calculate_backoff_seconds(error_count), MIN_BLOCK_BACKOFF_MINUTES * 60)
                     logger.error(
                         f"⛔ Заблоковано Incapsula, спроба №{error_count}, наступна через {wait_seconds // 60} хв"
