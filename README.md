@@ -68,6 +68,7 @@ PLAYWRIGHT_HEADLESS=1 docker compose up -d
 DTEK_COOKIE=visid_incap_...; incap_ses_...=...
 ```
 4. Перезапустити контейнер.
+5. Не додавайте службові атрибути (`Domain=...`, `Path=...`) та зайві аналітичні cookies (`_ga*`) — вони не потрібні для обходу блокування.
 
 **Примітки**
 
