@@ -15,7 +15,7 @@ from config import (
     SHUTDOWNS_URL,
     YOUR_QUEUE,
     CHECK_INTERVAL_MINUTES,
-    TIMEZONE, REDIS_HOST, REDIS_PORT, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
+    TIMEZONE, REDIS_HOST, REDIS_PORT, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ALERT_TELEGRAM_CHAT_ID,
     PLAYWRIGHT_BROWSER, PLAYWRIGHT_PROFILE_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_USER_AGENT,
     AUTO_HEADFUL_ON_BLOCK, ENABLE_HTTP_PREFETCH, MAX_BACKOFF_MINUTES, MIN_BLOCK_BACKOFF_MINUTES,
     BLOCK_ALERT_COOLDOWN_MINUTES,
@@ -321,6 +321,9 @@ def main():
         f"🍪 DTEK_COOKIE: {'set' if bool(DTEK_COOKIE) else 'empty'} | "
         f"UA: {'set' if bool(PLAYWRIGHT_USER_AGENT) else 'empty'}"
     )
+    print(
+        f"📣 Alerts chat: {'custom' if bool(ALERT_TELEGRAM_CHAT_ID) else 'default TELEGRAM_CHAT_ID'}"
+    )
     print()
 
     # Ініціалізуємо Redis
@@ -362,7 +365,8 @@ def main():
                 if status == "blocked":
                     if AUTO_HEADFUL_ON_BLOCK:
                         block_count += 1
-                    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+                    alert_chat_id = ALERT_TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID
+                    if TELEGRAM_TOKEN and alert_chat_id:
                         now_ts = datetime.now().timestamp()
                         cooldown_sec = max(1, BLOCK_ALERT_COOLDOWN_MINUTES) * 60
                         should_send_alert = (
@@ -373,7 +377,7 @@ def main():
                                 asyncio.run(
                                     send_telegram_message(
                                         TELEGRAM_TOKEN,
-                                        TELEGRAM_CHAT_ID,
+                                        alert_chat_id,
                                         "⚠️ Сайт вимагає перевірку людини (Incapsula). "
                                         "Потрібно оновити cookies або пройти перевірку вручну.",
                                     )
