@@ -29,7 +29,7 @@
 
 ```bash
 # Встановіть залежності
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 # Запустіть Redis для тестів
 docker run -d -p 6379:6379 redis
@@ -55,13 +55,13 @@ pytest -m "not slow"
 
 ```bash
 # Тільки тести Storage
-pytest test_dtek.py::TestStorage
+pytest test_light_off.py::TestStorage
 
 # Тільки тести Parser
-pytest test_dtek.py::TestParser
+pytest test_light_off.py::TestParser
 
 # Один конкретний тест
-pytest test_dtek.py::TestStorage::test_redis_connection
+pytest test_light_off.py::TestStorage::test_redis_connection
 
 # Тести що містять слово "changes"
 pytest -k "changes"
@@ -88,7 +88,7 @@ start htmlcov/index.html  # Windows
 ## 🎯 Структура тестів
 
 ```
-test_dtek.py
+test_light_off.py
 ├── Fixtures (підготовка даних)
 │   ├── redis_storage - тестове Redis підключення
 │   ├── sample_schedule_1 - тестовий графік 1
@@ -157,13 +157,13 @@ pytest --log-cli-level=DEBUG
 ## ✅ Очікувані результати
 
 ```
-test_dtek.py::TestStorage::test_redis_connection PASSED
-test_dtek.py::TestStorage::test_save_and_get_schedule PASSED
-test_dtek.py::TestStorage::test_has_changes_first_save PASSED
+test_light_off.py::TestStorage::test_redis_connection PASSED
+test_light_off.py::TestStorage::test_save_and_get_schedule PASSED
+test_light_off.py::TestStorage::test_has_changes_first_save PASSED
 ...
-test_dtek.py::TestParser::test_parse_shutdowns_basic PASSED
+test_light_off.py::TestParser::test_parse_shutdowns_basic PASSED
 ...
-test_dtek.py::TestExtractJSON::test_extract_simple_json PASSED
+test_light_off.py::TestExtractJSON::test_extract_simple_json PASSED
 ...
 
 ======================== 28 passed in 2.34s ========================

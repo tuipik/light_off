@@ -32,8 +32,8 @@ RUN apt-get update \
 # Копіюємо requirements та встановлюємо всі залежності пакетом
 COPY requirements.txt .
 
-# Встановлюємо python-залежності й playwright в одному шарі (без кешу)
-RUN pip install --no-cache-dir -r requirements.txt playwright \
+# Встановлюємо python-залежності та браузер Playwright (без кешу)
+RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install chromium
 
 # Копіюємо код додатку (docker-compose монтує volume у dev, а в image -- копія)

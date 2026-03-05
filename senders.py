@@ -15,12 +15,18 @@ async def send_telegram_message(token, chat_id, message):
         chat_id: ID чату або користувача.
         message: Текст повідомлення.
     """
+    if not token or not chat_id:
+        logger.error("❌ Telegram credentials не задані: token/chat_id порожні")
+        return False
+
     try:
         bot = Bot(token=token)
         await bot.send_message(chat_id=chat_id, text=message)
         logger.info("✅ Повідомлення успішно відправлено в Telegram")
+        return True
     except Exception as e:
         logger.error(f"❌ Помилка відправки повідомлення в Telegram: {e}")
+        return False
 
 
 def calculate_total_outage_hours(times: List[str]) -> float:

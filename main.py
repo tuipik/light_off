@@ -373,18 +373,16 @@ def main():
                             last_block_alert_ts is None or (now_ts - last_block_alert_ts) >= cooldown_sec
                         )
                         if should_send_alert:
-                            try:
-                                asyncio.run(
-                                    send_telegram_message(
-                                        TELEGRAM_TOKEN,
-                                        alert_chat_id,
-                                        "⚠️ Сайт вимагає перевірку людини (Incapsula). "
-                                        "Потрібно оновити cookies або пройти перевірку вручну.",
-                                    )
+                            sent = asyncio.run(
+                                send_telegram_message(
+                                    TELEGRAM_TOKEN,
+                                    alert_chat_id,
+                                    "⚠️ Сайт вимагає перевірку людини (Incapsula). "
+                                    "Потрібно оновити cookies або пройти перевірку вручну.",
                                 )
+                            )
+                            if sent:
                                 last_block_alert_ts = now_ts
-                            except Exception:
-                                pass
                         else:
                             remaining_min = int((cooldown_sec - (now_ts - last_block_alert_ts)) // 60)
                             logger.info(f"ℹ️ Alert про блок вже надіслано, повтор через ~{remaining_min} хв.")
@@ -436,12 +434,13 @@ def main():
                 if payload.get('update'):
                     message += f"\nОстаннє оновлення: {payload['update']}"
 
-                # Відправляємо повідомлення
-                asyncio.run(send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, message))
-
-                # Зберігаємо новий графік
-                storage.save_schedule(YOUR_QUEUE, schedule)  # Вкажіть ваші дані для Telegram
-                storage.save_history(YOUR_QUEUE, schedule)
+                # Відправляємо повідомлення. Зберігаємо стан тільки після успішної доставки.
+                sent = asyncio.run(send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, message))
+                if sent:
+                    storage.save_schedule(YOUR_QUEUE, schedule)
+                    storage.save_history(YOUR_QUEUE, schedule)
+                else:
+                    logger.error("❌ Графік не збережено, бо повідомлення не доставлено")
 
             else:
                 logger.info("\nℹ️  Графік не змінився")
