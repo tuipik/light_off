@@ -3,23 +3,23 @@
 """
 import asyncio
 import json
+import random
 import re
 from datetime import datetime, timezone
 from time import sleep
 
 import pytz
-import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 from config import (
     SHUTDOWNS_URL,
     YOUR_QUEUE,
-    CHECK_INTERVAL_MINUTES,
+    CHECK_INTERVAL_MINUTES, CHECK_INTERVAL_JITTER_PERCENT,
     TIMEZONE, REDIS_HOST, REDIS_PORT, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, ALERT_TELEGRAM_CHAT_ID,
     PLAYWRIGHT_BROWSER, PLAYWRIGHT_PROFILE_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_USER_AGENT,
-    AUTO_HEADFUL_ON_BLOCK, ENABLE_HTTP_PREFETCH, MAX_BACKOFF_MINUTES, MIN_BLOCK_BACKOFF_MINUTES,
+    AUTO_HEADFUL_ON_BLOCK, MAX_BACKOFF_MINUTES, MIN_BLOCK_BACKOFF_MINUTES, DEGRADED_MIN_MINUTES, DEGRADED_MAX_MINUTES,
     BLOCK_ALERT_COOLDOWN_MINUTES,
-    PLAYWRIGHT_GOTO_TIMEOUT_MS, HTTP_TIMEOUT_SECONDS, DTEK_COOKIE
+    PLAYWRIGHT_GOTO_TIMEOUT_MS, DTEK_COOKIE
 )
 from logger import logger
 from senders import send_telegram_message, generate_schedule_message
@@ -38,43 +38,24 @@ def _calculate_backoff_seconds(error_count: int) -> int:
     return max(backoff, CHECK_INTERVAL_MINUTES * 60)
 
 
-def _http_fetch_shutdowns():
-    headers = {}
-    if PLAYWRIGHT_USER_AGENT:
-        headers["User-Agent"] = PLAYWRIGHT_USER_AGENT
-    if DTEK_COOKIE:
-        headers["Cookie"] = DTEK_COOKIE
+def _with_jitter(seconds: int, jitter_percent: int) -> int:
+    """Додає випадковий jitter до інтервалу очікування."""
+    if jitter_percent <= 0:
+        return max(1, int(seconds))
+    spread = int(seconds * (jitter_percent / 100.0))
+    return max(1, int(seconds + random.randint(-spread, spread)))
 
-    try:
-        resp = requests.get(
-            SHUTDOWNS_URL,
-            headers=headers,
-            timeout=HTTP_TIMEOUT_SECONDS,
-            allow_redirects=True,
-        )
-    except requests.RequestException as e:
-        logger.warning(f"⚠️ HTTP fetch error: {e}")
-        return None, "error"
 
-    content = resp.text
-    if _looks_like_blocked_page(content):
-        logger.warning("⚠️ HTTP fetch отримав Incapsula challenge.")
-        return None, "blocked"
-
-    if "DisconSchedule.fact" in content:
-        logger.info("✅ HTML отримано через HTTP без браузера")
-        return content, "ok"
-
-    return None, "error"
+def _calculate_degraded_wait_seconds(error_count: int, degraded_level: int) -> int:
+    """Розрахунок базового інтервалу degraded-polling без jitter."""
+    degraded_base_seconds = max(DEGRADED_MIN_MINUTES * 60, MIN_BLOCK_BACKOFF_MINUTES * 60)
+    degraded_wait = degraded_base_seconds * (2 ** (max(1, degraded_level) - 1))
+    degraded_wait = min(degraded_wait, max(DEGRADED_MIN_MINUTES, DEGRADED_MAX_MINUTES) * 60)
+    return max(_calculate_backoff_seconds(error_count), degraded_wait)
 
 
 def get_shutdowns_html(force_headful: bool = False):
     """Отримує HTML сторінки через Playwright"""
-    if ENABLE_HTTP_PREFETCH:
-        http_content, http_status = _http_fetch_shutdowns()
-        if http_status == "ok":
-            return http_content, "ok"
-
     with sync_playwright() as p:
         browser_type = getattr(p, PLAYWRIGHT_BROWSER, p.chromium)
         context = browser_type.launch_persistent_context(
@@ -314,7 +295,8 @@ def main():
         f"auto_headful_on_block={AUTO_HEADFUL_ON_BLOCK}"
     )
     print(
-        f"🔐 HTTP prefetch: {ENABLE_HTTP_PREFETCH} | "
+        f"🎲 Jitter: {CHECK_INTERVAL_JITTER_PERCENT}% | "
+        f"degraded={DEGRADED_MIN_MINUTES}-{DEGRADED_MAX_MINUTES} хв | "
         f"block_alert_cooldown={BLOCK_ALERT_COOLDOWN_MINUTES} хв"
     )
     print(
@@ -342,6 +324,7 @@ def main():
     block_count = 0
     attempted_headful = False
     last_block_alert_ts = None
+    degraded_level = 0
 
     while True:
         try:
@@ -386,12 +369,16 @@ def main():
                         else:
                             remaining_min = int((cooldown_sec - (now_ts - last_block_alert_ts)) // 60)
                             logger.info(f"ℹ️ Alert про блок вже надіслано, повтор через ~{remaining_min} хв.")
-                    wait_seconds = max(_calculate_backoff_seconds(error_count), MIN_BLOCK_BACKOFF_MINUTES * 60)
+                    degraded_level += 1
+                    wait_seconds = _calculate_degraded_wait_seconds(error_count, degraded_level)
+                    wait_seconds = _with_jitter(wait_seconds, CHECK_INTERVAL_JITTER_PERCENT)
                     logger.error(
-                        f"⛔ Заблоковано Incapsula, спроба №{error_count}, наступна через {wait_seconds // 60} хв"
+                        f"⛔ Заблоковано Incapsula, спроба №{error_count}, degraded-рівень={degraded_level}, "
+                        f"наступна через {wait_seconds // 60} хв"
                     )
                 else:
                     wait_seconds = _calculate_backoff_seconds(error_count)
+                    wait_seconds = _with_jitter(wait_seconds, CHECK_INTERVAL_JITTER_PERCENT)
                     logger.error(
                         f"⚠️ Помилка завантаження, спроба №{error_count}, наступна через {wait_seconds // 60} хв"
                     )
@@ -419,7 +406,7 @@ def main():
             if not schedule:
                 logger.info(f"⚠️  Графік для черги {YOUR_QUEUE} порожній")
                 error_count = 0
-                sleep(CHECK_INTERVAL_MINUTES * 60)
+                sleep(_with_jitter(CHECK_INTERVAL_MINUTES * 60, CHECK_INTERVAL_JITTER_PERCENT))
                 continue
 
             logger.info(f"\n📊 Графік відключень для {YOUR_QUEUE}:")
@@ -450,7 +437,8 @@ def main():
             error_count = 0
             block_count = 0
             attempted_headful = False
-            sleep(CHECK_INTERVAL_MINUTES * 60)
+            degraded_level = 0
+            sleep(_with_jitter(CHECK_INTERVAL_MINUTES * 60, CHECK_INTERVAL_JITTER_PERCENT))
 
         except KeyboardInterrupt:
             logger.info("\n\n⛔ Моніторинг зупинено користувачем")
@@ -461,7 +449,7 @@ def main():
             import traceback
             traceback.print_exc()
             error_count += 1
-            wait_seconds = _calculate_backoff_seconds(error_count)
+            wait_seconds = _with_jitter(_calculate_backoff_seconds(error_count), CHECK_INTERVAL_JITTER_PERCENT)
             logger.error(f"\n⏳ Повторна спроба через {wait_seconds // 60} хвилин...")
             sleep(wait_seconds)
 

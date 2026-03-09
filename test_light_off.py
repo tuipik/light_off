@@ -7,7 +7,14 @@ import pytest
 import fakeredis
 
 from config import REDIS_PORT, REDIS_HOST
-from main import parse_shutdowns, _extract_balanced_json
+from main import (
+    parse_shutdowns,
+    _extract_balanced_json,
+    _with_jitter,
+    _calculate_degraded_wait_seconds,
+    DEGRADED_MIN_MINUTES,
+    DEGRADED_MAX_MINUTES,
+)
 from senders import generate_schedule_message, calculate_total_outage_hours
 from storage import ScheduleStorage
 
@@ -318,6 +325,33 @@ class TestMessages:
 
         message = generate_schedule_message(schedule)
         assert "Без світла: 1 год 30 хв" in message
+
+
+class TestPollingIntervals:
+    """Тести нової логіки jitter + degraded polling"""
+
+    def test_with_jitter_zero_percent(self):
+        """Без jitter значення має бути незмінним"""
+        assert _with_jitter(1200, 0) == 1200
+
+    def test_with_jitter_positive_range(self, monkeypatch):
+        """Jitter має змінювати інтервал у межах очікуваного spread"""
+        # spread = 20% від 1000 = 200
+        monkeypatch.setattr("main.random.randint", lambda a, b: 200)
+        assert _with_jitter(1000, 20) == 1200
+
+        monkeypatch.setattr("main.random.randint", lambda a, b: -200)
+        assert _with_jitter(1000, 20) == 800
+
+    def test_calculate_degraded_wait_first_level(self):
+        """Перший degraded-рівень не менший за мінімально допустимий"""
+        wait_seconds = _calculate_degraded_wait_seconds(error_count=1, degraded_level=1)
+        assert wait_seconds >= DEGRADED_MIN_MINUTES * 60
+
+    def test_calculate_degraded_wait_capped(self):
+        """Degraded інтервал має обмеження зверху"""
+        wait_seconds = _calculate_degraded_wait_seconds(error_count=1, degraded_level=20)
+        assert wait_seconds <= max(DEGRADED_MIN_MINUTES, DEGRADED_MAX_MINUTES) * 60
 
 
 # ============= ТЕСТИ EXTRACT JSON =============

@@ -24,6 +24,7 @@ export TELEGRAM_CHAT_ID=your_chat_id
 export ALERT_TELEGRAM_CHAT_ID=your_personal_chat_id
 export YOUR_QUEUE=GPV3.2
 export CHECK_INTERVAL_MINUTES=20
+export CHECK_INTERVAL_JITTER_PERCENT=30
 export TIMEZONE=Europe/Kyiv
 ```
 
@@ -77,4 +78,4 @@ DTEK_COOKIE=visid_incap_...; incap_ses_...=...
 - Для обходу Incapsula потрібно один раз пройти перевірку в браузері з профілем. Профіль зберігається у volume `pw_profile`.
 - Якщо Incapsula блокує, запустіть контейнер разово з `PLAYWRIGHT_HEADLESS=0` — в Docker використовується `xvfb`, тому дисплей не потрібен. Після проходження перевірки поверніть `PLAYWRIGHT_HEADLESS=1`.
 - Для технічних алертів (Incapsula) можна задати окремий чат `ALERT_TELEGRAM_CHAT_ID`; якщо не задано, алерти йдуть у `TELEGRAM_CHAT_ID`.
-- Доступні параметри керування повторними спробами: `AUTO_HEADFUL_ON_BLOCK=1` (разова спроба headful при блокуванні), `ENABLE_HTTP_PREFETCH=0` (попередній HTTP-запит без браузера), `MAX_BACKOFF_MINUTES=60` (максимальний інтервал між спробами), `MIN_BLOCK_BACKOFF_MINUTES=60` (мінімальна пауза при блокуванні), `BLOCK_ALERT_COOLDOWN_MINUTES=360` (період між алертами про блок), `PLAYWRIGHT_GOTO_TIMEOUT_MS=60000` (таймаут завантаження сторінки) і `HTTP_TIMEOUT_SECONDS=20` (таймаут HTTP-запиту без браузера).
+- Доступні параметри керування повторними спробами: `AUTO_HEADFUL_ON_BLOCK=1` (разова спроба headful при блокуванні), `CHECK_INTERVAL_JITTER_PERCENT=30` (рандомізація інтервалів опитування), `MAX_BACKOFF_MINUTES=60` (максимальний інтервал для загальних помилок), `MIN_BLOCK_BACKOFF_MINUTES=60` (мінімальна пауза при блокуванні), `DEGRADED_MIN_MINUTES=120` / `DEGRADED_MAX_MINUTES=360` (режим degraded polling при блокуванні), `BLOCK_ALERT_COOLDOWN_MINUTES=360` (період між алертами про блок) і `PLAYWRIGHT_GOTO_TIMEOUT_MS=60000` (таймаут завантаження сторінки).
