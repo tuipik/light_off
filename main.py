@@ -46,6 +46,14 @@ def _with_jitter(seconds: int, jitter_percent: int) -> int:
     return max(1, int(seconds + random.randint(-spread, spread)))
 
 
+def _format_wait(seconds: int) -> str:
+    minutes = seconds // 60
+    rem_seconds = seconds % 60
+    if rem_seconds == 0:
+        return f"{minutes} хв"
+    return f"{minutes} хв {rem_seconds} с"
+
+
 def _calculate_degraded_wait_seconds(error_count: int, degraded_level: int) -> int:
     """Розрахунок базового інтервалу degraded-polling без jitter."""
     degraded_base_seconds = max(DEGRADED_MIN_MINUTES * 60, MIN_BLOCK_BACKOFF_MINUTES * 60)
@@ -374,13 +382,13 @@ def main():
                     wait_seconds = _with_jitter(wait_seconds, CHECK_INTERVAL_JITTER_PERCENT)
                     logger.error(
                         f"⛔ Заблоковано Incapsula, спроба №{error_count}, degraded-рівень={degraded_level}, "
-                        f"наступна через {wait_seconds // 60} хв"
+                        f"наступна через {_format_wait(wait_seconds)}"
                     )
                 else:
                     wait_seconds = _calculate_backoff_seconds(error_count)
                     wait_seconds = _with_jitter(wait_seconds, CHECK_INTERVAL_JITTER_PERCENT)
                     logger.error(
-                        f"⚠️ Помилка завантаження, спроба №{error_count}, наступна через {wait_seconds // 60} хв"
+                        f"⚠️ Помилка завантаження, спроба №{error_count}, наступна через {_format_wait(wait_seconds)}"
                     )
                 sleep(wait_seconds)
                 continue
@@ -392,8 +400,9 @@ def main():
                 logger.error("❌ Не вдалося розпарсити дані")
                 error_count += 1
                 wait_seconds = _calculate_backoff_seconds(error_count)
+                wait_seconds = _with_jitter(wait_seconds, CHECK_INTERVAL_JITTER_PERCENT)
                 logger.error(
-                    f"⚠️ Помилка парсингу, спроба №{error_count}, наступна через {wait_seconds // 60} хв"
+                    f"⚠️ Помилка парсингу, спроба №{error_count}, наступна через {_format_wait(wait_seconds)}"
                 )
                 sleep(wait_seconds)
                 continue
@@ -406,7 +415,9 @@ def main():
             if not schedule:
                 logger.info(f"⚠️  Графік для черги {YOUR_QUEUE} порожній")
                 error_count = 0
-                sleep(_with_jitter(CHECK_INTERVAL_MINUTES * 60, CHECK_INTERVAL_JITTER_PERCENT))
+                next_wait_seconds = _with_jitter(CHECK_INTERVAL_MINUTES * 60, CHECK_INTERVAL_JITTER_PERCENT)
+                logger.info(f"⏳ Наступна перевірка порожнього графіка через {_format_wait(next_wait_seconds)}")
+                sleep(next_wait_seconds)
                 continue
 
             logger.info(f"\n📊 Графік відключень для {YOUR_QUEUE}:")
@@ -433,12 +444,13 @@ def main():
                 logger.info("\nℹ️  Графік не змінився")
 
             # 5. Чекаємо до наступної перевірки
-            print(f"\n⏳ Наступна перевірка через {CHECK_INTERVAL_MINUTES} хв...")
+            next_wait_seconds = _with_jitter(CHECK_INTERVAL_MINUTES * 60, CHECK_INTERVAL_JITTER_PERCENT)
+            print(f"\n⏳ Наступна перевірка через {_format_wait(next_wait_seconds)}...")
             error_count = 0
             block_count = 0
             attempted_headful = False
             degraded_level = 0
-            sleep(_with_jitter(CHECK_INTERVAL_MINUTES * 60, CHECK_INTERVAL_JITTER_PERCENT))
+            sleep(next_wait_seconds)
 
         except KeyboardInterrupt:
             logger.info("\n\n⛔ Моніторинг зупинено користувачем")
@@ -450,7 +462,7 @@ def main():
             traceback.print_exc()
             error_count += 1
             wait_seconds = _with_jitter(_calculate_backoff_seconds(error_count), CHECK_INTERVAL_JITTER_PERCENT)
-            logger.error(f"\n⏳ Повторна спроба через {wait_seconds // 60} хвилин...")
+            logger.error(f"\n⏳ Повторна спроба через {_format_wait(wait_seconds)}...")
             sleep(wait_seconds)
 
 
