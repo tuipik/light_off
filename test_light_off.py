@@ -339,9 +339,8 @@ class TestPollingIntervals:
         # spread = 20% від 1000 = 200
         monkeypatch.setattr("main.random.randint", lambda a, b: 200)
         assert _with_jitter(1000, 20) == 1200
-
-        monkeypatch.setattr("main.random.randint", lambda a, b: -200)
-        assert _with_jitter(1000, 20) == 800
+        monkeypatch.setattr("main.random.randint", lambda a, b: 0)
+        assert _with_jitter(1000, 20) == 1000
 
     def test_calculate_degraded_wait_first_level(self):
         """Перший degraded-рівень не менший за мінімально допустимий"""

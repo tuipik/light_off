@@ -3,6 +3,7 @@
 """
 import asyncio
 import json
+import os
 import random
 import re
 from datetime import datetime, timezone
@@ -39,11 +40,11 @@ def _calculate_backoff_seconds(error_count: int) -> int:
 
 
 def _with_jitter(seconds: int, jitter_percent: int) -> int:
-    """Додає випадковий jitter до інтервалу очікування."""
+    """Додає випадковий jitter до інтервалу очікування, не зменшуючи базу."""
     if jitter_percent <= 0:
         return max(1, int(seconds))
     spread = int(seconds * (jitter_percent / 100.0))
-    return max(1, int(seconds + random.randint(-spread, spread)))
+    return max(1, int(seconds + random.randint(0, spread)))
 
 
 def _format_wait(seconds: int) -> str:
@@ -60,6 +61,13 @@ def _calculate_degraded_wait_seconds(error_count: int, degraded_level: int) -> i
     degraded_wait = degraded_base_seconds * (2 ** (max(1, degraded_level) - 1))
     degraded_wait = min(degraded_wait, max(DEGRADED_MIN_MINUTES, DEGRADED_MAX_MINUTES) * 60)
     return max(_calculate_backoff_seconds(error_count), degraded_wait)
+
+
+def _can_run_headful() -> bool:
+    """Перевіряє, чи можна запускати headful (є DISPLAY або вимкнений headless)."""
+    if not PLAYWRIGHT_HEADLESS:
+        return True
+    return bool(os.getenv("DISPLAY"))
 
 
 def get_shutdowns_html(force_headful: bool = False):
@@ -344,8 +352,10 @@ def main():
             print(f"{'=' * 60}")
 
             # 1. Отримуємо HTML
-            force_headful = AUTO_HEADFUL_ON_BLOCK and not attempted_headful and block_count > 0
-            if force_headful:
+            force_headful = AUTO_HEADFUL_ON_BLOCK and not attempted_headful and block_count > 0 and _can_run_headful()
+            if AUTO_HEADFUL_ON_BLOCK and not attempted_headful and block_count > 0 and not force_headful:
+                logger.warning("⚠️ Пропускаю headful-режим: відсутній DISPLAY або headless увімкнено.")
+            elif force_headful:
                 logger.warning("⚠️ Спроба headful-режиму через xvfb для проходження Incapsula.")
             html, status = get_shutdowns_html(force_headful=force_headful)
             if force_headful:
