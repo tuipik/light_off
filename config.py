@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 SHUTDOWNS_URL = "https://www.dtek-krem.com.ua/ua/shutdowns"
 
@@ -42,3 +43,6 @@ BLOCK_ALERT_COOLDOWN_MINUTES = _get_int_env("BLOCK_ALERT_COOLDOWN_MINUTES", 360)
 PLAYWRIGHT_GOTO_TIMEOUT_MS = _get_int_env("PLAYWRIGHT_GOTO_TIMEOUT_MS", 60000)
 HTTP_TIMEOUT_SECONDS = _get_int_env("HTTP_TIMEOUT_SECONDS", 20)
 DTEK_COOKIE = os.getenv("DTEK_COOKIE")
+BLOCK_DEBUG_ENABLED = _get_bool_env("BLOCK_DEBUG_ENABLED", True)
+BLOCK_DEBUG_DIR = os.getenv("BLOCK_DEBUG_DIR", str(Path("debug") / "blocks"))
+BLOCK_DEBUG_MAX_ARTIFACTS = _get_int_env("BLOCK_DEBUG_MAX_ARTIFACTS", 20)

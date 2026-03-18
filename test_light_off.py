@@ -2,12 +2,21 @@
 Тести для ДТЕК моніторингу
 """
 import json
+from pathlib import Path
 
 import pytest
 import fakeredis
 
+import main as main_module
 from config import REDIS_PORT, REDIS_HOST
-from main import parse_shutdowns, _extract_balanced_json
+from main import (
+    FetchResult,
+    parse_shutdowns,
+    _extract_balanced_json,
+    _fetch_with_recovery_ladder,
+    _parse_cookie_header,
+    _save_block_debug_artifacts,
+)
 from senders import generate_schedule_message, calculate_total_outage_hours
 from storage import ScheduleStorage
 
@@ -393,6 +402,87 @@ class TestExtractJSON:
         result = _extract_balanced_json(text, len(text) + 10)
 
         assert result is None
+
+
+class TestRecoveryFlow:
+    """Тести для recovery ladder і debug artifacts"""
+
+    def test_parse_cookie_header(self):
+        cookies = _parse_cookie_header("visid=abc; incap=def")
+
+        assert cookies == [
+            {"name": "visid", "value": "abc", "domain": "www.dtek-krem.com.ua", "path": "/"},
+            {"name": "incap", "value": "def", "domain": "www.dtek-krem.com.ua", "path": "/"},
+        ]
+
+    def test_save_block_debug_artifacts(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(main_module, "BLOCK_DEBUG_ENABLED", True)
+        monkeypatch.setattr(main_module, "BLOCK_DEBUG_DIR", str(tmp_path))
+        monkeypatch.setattr(main_module, "BLOCK_DEBUG_MAX_ARTIFACTS", 5)
+
+        fetch_result = FetchResult(
+            content="<html>blocked</html>",
+            status="blocked",
+            mode="playwright_headless",
+            details={"response_status": 403},
+        )
+
+        meta_path = _save_block_debug_artifacts(fetch_result, "TEST_QUEUE")
+
+        assert meta_path is not None
+        assert meta_path.exists()
+        html_path = Path(str(meta_path).replace(".json", ".html"))
+        assert html_path.exists()
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert metadata["queue"] == "TEST_QUEUE"
+        assert metadata["status"] == "blocked"
+        assert html_path.read_text(encoding="utf-8") == "<html>blocked</html>"
+
+    def test_fetch_with_recovery_ladder_recovers_after_block(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(main_module, "AUTO_HEADFUL_ON_BLOCK", True)
+        monkeypatch.setattr(main_module, "BLOCK_DEBUG_ENABLED", True)
+        monkeypatch.setattr(main_module, "BLOCK_DEBUG_DIR", str(tmp_path))
+        monkeypatch.setattr(main_module, "BLOCK_DEBUG_MAX_ARTIFACTS", 5)
+
+        responses = iter(
+            [
+                FetchResult(content="<html>Incapsula incident ID</html>", status="blocked", mode="playwright_headless"),
+                FetchResult(content="<html>ok</html>", status="ok", mode="playwright_headless"),
+            ]
+        )
+
+        monkeypatch.setattr(main_module, "get_shutdowns_html", lambda recovery_step=0: next(responses))
+
+        result = _fetch_with_recovery_ladder("TEST_QUEUE")
+
+        assert result.status == "ok"
+        assert result.details["recovery_attempts"] == [
+            {"step": 0, "status": "blocked", "mode": "playwright_headless"},
+            {"step": 1, "status": "ok", "mode": "playwright_headless"},
+        ]
+        artifacts = list(tmp_path.glob("*.json"))
+        assert len(artifacts) == 1
+
+    def test_fetch_with_recovery_ladder_stops_before_headful_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(main_module, "AUTO_HEADFUL_ON_BLOCK", False)
+
+        calls = []
+
+        def fake_get_shutdowns_html(recovery_step=0):
+            calls.append(recovery_step)
+            return FetchResult(content=None, status="error", mode=f"mode_{recovery_step}")
+
+        monkeypatch.setattr(main_module, "get_shutdowns_html", fake_get_shutdowns_html)
+        monkeypatch.setattr(main_module, "_save_block_debug_artifacts", lambda *args, **kwargs: None)
+
+        result = _fetch_with_recovery_ladder("TEST_QUEUE")
+
+        assert result.status == "error"
+        assert calls == [0, 1]
+        assert result.details["recovery_attempts"] == [
+            {"step": 0, "status": "error", "mode": "mode_0"},
+            {"step": 1, "status": "error", "mode": "mode_1"},
+        ]
 
 
 # ============= ЗАПУСК ТЕСТІВ =============

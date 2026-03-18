@@ -36,11 +36,16 @@ services:
       - BLOCK_ALERT_COOLDOWN_MINUTES=${BLOCK_ALERT_COOLDOWN_MINUTES:-360}
       - PLAYWRIGHT_GOTO_TIMEOUT_MS=${PLAYWRIGHT_GOTO_TIMEOUT_MS:-60000}
       - HTTP_TIMEOUT_SECONDS=${HTTP_TIMEOUT_SECONDS:-20}
+      - BLOCK_DEBUG_ENABLED=${BLOCK_DEBUG_ENABLED:-1}
+      - BLOCK_DEBUG_DIR=${BLOCK_DEBUG_DIR:-debug/blocks}
+      - BLOCK_DEBUG_MAX_ARTIFACTS=${BLOCK_DEBUG_MAX_ARTIFACTS:-20}
       - DTEK_COOKIE
     command: /app/start.sh
     volumes:
       - pw_profile:/app/pw_profile
+      - debug_data:/app/debug
 
 volumes:
   redis_data:
   pw_profile:
+  debug_data:
