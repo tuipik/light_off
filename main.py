@@ -6,8 +6,11 @@ import json
 import os
 import random
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from time import sleep
+from typing import Any, Dict, List, Optional
 
 import pytz
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
@@ -20,11 +23,22 @@ from config import (
     PLAYWRIGHT_BROWSER, PLAYWRIGHT_PROFILE_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_USER_AGENT,
     AUTO_HEADFUL_ON_BLOCK, MAX_BACKOFF_MINUTES, MIN_BLOCK_BACKOFF_MINUTES, DEGRADED_MIN_MINUTES, DEGRADED_MAX_MINUTES,
     BLOCK_ALERT_COOLDOWN_MINUTES,
-    PLAYWRIGHT_GOTO_TIMEOUT_MS, DTEK_COOKIE
+    PLAYWRIGHT_GOTO_TIMEOUT_MS, DTEK_COOKIE,
+    BLOCK_DEBUG_ENABLED, BLOCK_DEBUG_DIR, BLOCK_DEBUG_MAX_ARTIFACTS
 )
 from logger import logger
 from senders import send_telegram_message, generate_schedule_message
 from storage import ScheduleStorage
+
+
+@dataclass
+class FetchResult:
+    content: Optional[str]
+    status: str
+    mode: str
+    attempt: int = 1
+    used_headful: bool = False
+    details: Dict[str, Any] = field(default_factory=dict)
 
 
 def _looks_like_blocked_page(content: str) -> bool:
@@ -63,6 +77,49 @@ def _calculate_degraded_wait_seconds(error_count: int, degraded_level: int) -> i
     return max(_calculate_backoff_seconds(error_count), degraded_wait)
 
 
+def _normalize_filename(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", value).strip("._") or "artifact"
+
+
+def _trim_debug_artifacts(debug_dir: Path, keep_count: int) -> None:
+    if keep_count <= 0 or not debug_dir.exists():
+        return
+
+    entries = sorted(debug_dir.iterdir(), key=lambda entry: entry.stat().st_mtime, reverse=True)
+    for old_entry in entries[keep_count:]:
+        if old_entry.is_file():
+            old_entry.unlink(missing_ok=True)
+
+
+def _save_block_debug_artifacts(fetch_result: FetchResult, queue_name: str) -> Optional[Path]:
+    if not BLOCK_DEBUG_ENABLED:
+        return None
+
+    debug_dir = Path(BLOCK_DEBUG_DIR)
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = _normalize_filename(f"{timestamp}_{queue_name}_{fetch_result.mode}_try{fetch_result.attempt}")
+
+    metadata = {
+        "timestamp": datetime.now().isoformat(),
+        "queue": queue_name,
+        "status": fetch_result.status,
+        "mode": fetch_result.mode,
+        "attempt": fetch_result.attempt,
+        "used_headful": fetch_result.used_headful,
+        "details": fetch_result.details,
+    }
+
+    meta_path = debug_dir / f"{prefix}.json"
+    html_path = debug_dir / f"{prefix}.html"
+
+    meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    html_path.write_text(fetch_result.content or "", encoding="utf-8")
+    _trim_debug_artifacts(debug_dir, BLOCK_DEBUG_MAX_ARTIFACTS * 2)
+    return meta_path
+
+
 def _can_run_headful() -> bool:
     """Перевіряє, чи можна запускати headful (є DISPLAY або вимкнений headless)."""
     if not PLAYWRIGHT_HEADLESS:
@@ -70,8 +127,31 @@ def _can_run_headful() -> bool:
     return bool(os.getenv("DISPLAY"))
 
 
-def get_shutdowns_html(force_headful: bool = False):
+def _parse_cookie_header(cookie_header: Optional[str]) -> List[Dict[str, str]]:
+    cookies = []
+    if not cookie_header:
+        return cookies
+
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        cookies.append(
+            {
+                "name": name.strip(),
+                "value": value.strip(),
+                "domain": "www.dtek-krem.com.ua",
+                "path": "/",
+            }
+        )
+    return cookies
+
+
+def _playwright_fetch_shutdowns(force_headful: bool = False, same_context_retries: int = 1) -> FetchResult:
     """Отримує HTML сторінки через Playwright"""
+    cookies = _parse_cookie_header(DTEK_COOKIE)
+
     with sync_playwright() as p:
         browser_type = getattr(p, PLAYWRIGHT_BROWSER, p.chromium)
         context = browser_type.launch_persistent_context(
@@ -83,74 +163,164 @@ def get_shutdowns_html(force_headful: bool = False):
         )
 
         try:
-            if DTEK_COOKIE:
-                cookies = []
-                for part in DTEK_COOKIE.split(";"):
-                    part = part.strip()
-                    if not part or "=" not in part:
-                        continue
-                    name, value = part.split("=", 1)
-                    cookies.append(
-                        {
-                            "name": name.strip(),
-                            "value": value.strip(),
-                            "domain": "www.dtek-krem.com.ua",
-                            "path": "/",
-                        }
-                    )
-                if cookies:
-                    logger.info(f"🍪 Передаю cookies у browser context: {len(cookies)} шт.")
-                    context.add_cookies(cookies)
+            if cookies:
+                logger.info(f"🍪 Передаю cookies у browser context: {len(cookies)} шт.")
+                context.add_cookies(cookies)
             page = context.new_page()
             if PLAYWRIGHT_USER_AGENT:
                 logger.info("🧭 Використовую кастомний User-Agent для Playwright.")
                 page.set_extra_http_headers({"User-Agent": PLAYWRIGHT_USER_AGENT})
             page.set_default_navigation_timeout(PLAYWRIGHT_GOTO_TIMEOUT_MS)
 
-            logger.info(f"🔄 Завантажую {SHUTDOWNS_URL}...")
-            try:
-                page.goto(SHUTDOWNS_URL, wait_until="domcontentloaded", timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS)
-            except PlaywrightTimeoutError:
-                logger.warning(f"⚠️ Timeout {PLAYWRIGHT_GOTO_TIMEOUT_MS}ms при завантаженні, пробую взяти content.")
-            except PlaywrightError as e:
-                logger.error(f"❌ Помилка завантаження сторінки: {e}")
-                return None, "error"
+            browser_name = getattr(browser_type, "name", PLAYWRIGHT_BROWSER)
+            base_details = {
+                "browser": browser_name,
+                "headful": force_headful,
+                "profile_dir": PLAYWRIGHT_PROFILE_DIR,
+                "configured_cookie_count": len(cookies),
+            }
 
-            page.wait_for_timeout(3000)
-            try:
-                page.wait_for_function(
-                    "() => document.body && document.body.innerText.includes('DisconSchedule.fact')",
-                    timeout=20000
-                )
-            except Exception:
-                pass
-
-            try:
-                content = page.content()
-            except PlaywrightError as e:
-                logger.error(f"❌ Не вдалося прочитати content сторінки: {e}")
-                return None, "error"
-
-            if _looks_like_blocked_page(content):
-                logger.error("❌ Сайт повернув Incapsula challenge.")
-                # Give the JS challenge a chance to set cookies, then retry once in the same context.
-                logger.info("⏳ Очікую 15с і роблю повторний запит у тому ж контексті...")
-                page.wait_for_timeout(15000)
+            for attempt in range(1, same_context_retries + 2):
+                logger.info(f"🔄 Завантажую {SHUTDOWNS_URL}... (mode=playwright, attempt={attempt})")
                 try:
-                    page.reload(wait_until="domcontentloaded", timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS)
-                    page.wait_for_timeout(3000)
+                    if attempt == 1:
+                        response = page.goto(
+                            SHUTDOWNS_URL,
+                            wait_until="domcontentloaded",
+                            timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS,
+                        )
+                    else:
+                        response = page.reload(
+                            wait_until="domcontentloaded",
+                            timeout=PLAYWRIGHT_GOTO_TIMEOUT_MS,
+                        )
+                except PlaywrightTimeoutError:
+                    logger.warning(
+                        f"⚠️ Timeout {PLAYWRIGHT_GOTO_TIMEOUT_MS}ms при завантаженні, пробую взяти content."
+                    )
+                    response = None
+                except PlaywrightError as e:
+                    logger.error(f"❌ Помилка завантаження сторінки: {e}")
+                    return FetchResult(
+                        content=None,
+                        status="error",
+                        mode="playwright_headful" if force_headful else "playwright_headless",
+                        attempt=attempt,
+                        used_headful=force_headful,
+                        details={**base_details, "exception": str(e)},
+                    )
+
+                page.wait_for_timeout(3000)
+                try:
+                    page.wait_for_function(
+                        "() => document.body && document.body.innerText.includes('DisconSchedule.fact')",
+                        timeout=20000
+                    )
+                except Exception:
+                    pass
+
+                try:
                     content = page.content()
                 except PlaywrightError as e:
-                    logger.error(f"❌ Retry після challenge завершився помилкою: {e}")
-                    return None, "blocked"
+                    logger.error(f"❌ Не вдалося прочитати content сторінки: {e}")
+                    return FetchResult(
+                        content=None,
+                        status="error",
+                        mode="playwright_headful" if force_headful else "playwright_headless",
+                        attempt=attempt,
+                        used_headful=force_headful,
+                        details={**base_details, "exception": str(e)},
+                    )
+
+                context_cookies = context.cookies()
+                details = {
+                    **base_details,
+                    "response_status": response.status if response else None,
+                    "response_url": response.url if response else page.url,
+                    "response_headers": response.all_headers() if response else {},
+                    "context_cookie_count": len(context_cookies),
+                    "context_cookies": context_cookies,
+                    "page_title": page.title(),
+                }
 
                 if _looks_like_blocked_page(content):
-                    return None, "blocked"
+                    logger.error("❌ Сайт повернув Incapsula challenge.")
+                    if attempt <= same_context_retries:
+                        logger.info("⏳ Очікую 15с і роблю повторний запит у тому ж контексті...")
+                        page.wait_for_timeout(15000)
+                        continue
 
-            logger.info(f"✅ Отримано {len(content)} байт")
-            return content, "ok"
+                    return FetchResult(
+                        content=content,
+                        status="blocked",
+                        mode="playwright_headful" if force_headful else "playwright_headless",
+                        attempt=attempt,
+                        used_headful=force_headful,
+                        details=details,
+                    )
+
+                logger.info(f"✅ Отримано {len(content)} байт")
+                return FetchResult(
+                    content=content,
+                    status="ok",
+                    mode="playwright_headful" if force_headful else "playwright_headless",
+                    attempt=attempt,
+                    used_headful=force_headful,
+                    details=details,
+                )
         finally:
             context.close()
+
+
+def get_shutdowns_html(recovery_step: int = 0) -> FetchResult:
+    if recovery_step == 0:
+        return _playwright_fetch_shutdowns(force_headful=False, same_context_retries=1)
+    if recovery_step == 1:
+        logger.warning("⚠️ Перезапускаю браузерний процес з тим самим профілем.")
+        return _playwright_fetch_shutdowns(force_headful=False, same_context_retries=0)
+    if recovery_step == 2:
+        if not AUTO_HEADFUL_ON_BLOCK:
+            return FetchResult(content=None, status="error", mode="headful_disabled")
+        if not _can_run_headful():
+            return FetchResult(content=None, status="error", mode="headful_unavailable")
+        logger.warning("⚠️ Переходжу в headful-режим через xvfb для відновлення сесії.")
+        return _playwright_fetch_shutdowns(force_headful=True, same_context_retries=0)
+
+    return FetchResult(content=None, status="error", mode="recovery_exhausted", details={"step": recovery_step})
+
+
+def _fetch_with_recovery_ladder(queue_name: str) -> FetchResult:
+    attempts = []
+    max_recovery_steps = 3 if AUTO_HEADFUL_ON_BLOCK else 2
+
+    for recovery_step in range(max_recovery_steps):
+        result = get_shutdowns_html(recovery_step=recovery_step)
+        attempts.append({"step": recovery_step, "status": result.status, "mode": result.mode})
+
+        if result.status == "ok":
+            result.details["recovery_attempts"] = attempts
+            return result
+
+        if result.status == "blocked":
+            artifact_path = _save_block_debug_artifacts(result, queue_name)
+            if artifact_path:
+                result.details["artifact_path"] = str(artifact_path)
+                logger.warning(f"🧾 Збережено debug artifact: {artifact_path}")
+            continue
+
+        if result.status == "error" and recovery_step < (max_recovery_steps - 1):
+            logger.warning(f"⚠️ Fetch завершився помилкою в режимі {result.mode}, пробую наступний крок recovery.")
+            continue
+
+        result.details["recovery_attempts"] = attempts
+        return result
+
+    return FetchResult(
+        content=None,
+        status="blocked",
+        mode="recovery_exhausted",
+        details={"recovery_attempts": attempts},
+    )
 
 
 def extract_schedule_data(html):
@@ -337,8 +507,6 @@ def main():
 
     iteration = 0
     error_count = 0
-    block_count = 0
-    attempted_headful = False
     last_block_alert_ts = None
     degraded_level = 0
 
@@ -352,20 +520,12 @@ def main():
             print(f"{'=' * 60}")
 
             # 1. Отримуємо HTML
-            force_headful = AUTO_HEADFUL_ON_BLOCK and not attempted_headful and block_count > 0 and _can_run_headful()
-            if AUTO_HEADFUL_ON_BLOCK and not attempted_headful and block_count > 0 and not force_headful:
-                logger.warning("⚠️ Пропускаю headful-режим: відсутній DISPLAY або headless увімкнено.")
-            elif force_headful:
-                logger.warning("⚠️ Спроба headful-режиму через xvfb для проходження Incapsula.")
-            html, status = get_shutdowns_html(force_headful=force_headful)
-            if force_headful:
-                attempted_headful = True
+            fetch_result = _fetch_with_recovery_ladder(YOUR_QUEUE)
+            html = fetch_result.content
 
             if not html:
                 error_count += 1
-                if status == "blocked":
-                    if AUTO_HEADFUL_ON_BLOCK:
-                        block_count += 1
+                if fetch_result.status == "blocked":
                     alert_chat_id = ALERT_TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID
                     if TELEGRAM_TOKEN and alert_chat_id:
                         now_ts = datetime.now().timestamp()
@@ -374,12 +534,17 @@ def main():
                             last_block_alert_ts is None or (now_ts - last_block_alert_ts) >= cooldown_sec
                         )
                         if should_send_alert:
+                            artifact_note = ""
+                            artifact_path = fetch_result.details.get("artifact_path")
+                            if artifact_path:
+                                artifact_note = f"\nDebug artifact: {artifact_path}"
                             sent = asyncio.run(
                                 send_telegram_message(
                                     TELEGRAM_TOKEN,
                                     alert_chat_id,
                                     "⚠️ Сайт вимагає перевірку людини (Incapsula). "
-                                    "Потрібно оновити cookies або пройти перевірку вручну.",
+                                    "Потрібно оновити cookies або пройти перевірку вручну."
+                                    f"\nРежим: {fetch_result.mode}{artifact_note}",
                                 )
                             )
                             if sent:
@@ -391,14 +556,16 @@ def main():
                     wait_seconds = _calculate_degraded_wait_seconds(error_count, degraded_level)
                     wait_seconds = _with_jitter(wait_seconds, CHECK_INTERVAL_JITTER_PERCENT)
                     logger.error(
-                        f"⛔ Заблоковано Incapsula, спроба №{error_count}, degraded-рівень={degraded_level}, "
+                        f"⛔ Заблоковано Incapsula, режим={fetch_result.mode}, "
+                        f"спроба №{error_count}, degraded-рівень={degraded_level}, "
                         f"наступна через {_format_wait(wait_seconds)}"
                     )
                 else:
                     wait_seconds = _calculate_backoff_seconds(error_count)
                     wait_seconds = _with_jitter(wait_seconds, CHECK_INTERVAL_JITTER_PERCENT)
                     logger.error(
-                        f"⚠️ Помилка завантаження, спроба №{error_count}, наступна через {_format_wait(wait_seconds)}"
+                        f"⚠️ Помилка завантаження ({fetch_result.mode}), "
+                        f"спроба №{error_count}, наступна через {_format_wait(wait_seconds)}"
                     )
                 sleep(wait_seconds)
                 continue
@@ -457,8 +624,6 @@ def main():
             next_wait_seconds = _with_jitter(CHECK_INTERVAL_MINUTES * 60, CHECK_INTERVAL_JITTER_PERCENT)
             print(f"\n⏳ Наступна перевірка через {_format_wait(next_wait_seconds)}...")
             error_count = 0
-            block_count = 0
-            attempted_headful = False
             degraded_level = 0
             sleep(next_wait_seconds)
 
