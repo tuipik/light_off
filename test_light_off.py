@@ -17,6 +17,7 @@ from main import (
     _calculate_degraded_wait_seconds,
     _fetch_with_recovery_ladder,
     _parse_cookie_header,
+    _read_page_content_with_retries,
     _save_block_debug_artifacts,
     DEGRADED_MIN_MINUTES,
     DEGRADED_MAX_MINUTES,
@@ -438,6 +439,42 @@ class TestRecoveryFlow:
             {"step": 0, "status": "error", "mode": "mode_0"},
             {"step": 1, "status": "error", "mode": "mode_1"},
         ]
+
+    def test_read_page_content_with_retries_recovers_after_navigation(self):
+        class FakePage:
+            def __init__(self):
+                self.calls = 0
+
+            def content(self):
+                self.calls += 1
+                if self.calls < 3:
+                    raise main_module.PlaywrightError(
+                        "Page.content: Unable to retrieve content because the page is navigating and changing the content."
+                    )
+                return "<html>ok</html>"
+
+            def wait_for_timeout(self, delay_ms):
+                return None
+
+        page = FakePage()
+
+        result = _read_page_content_with_retries(page, attempts=4, delay_ms=1)
+
+        assert result == "<html>ok</html>"
+        assert page.calls == 3
+
+    def test_read_page_content_with_retries_raises_non_navigation_error(self):
+        class FakePage:
+            def content(self):
+                raise main_module.PlaywrightError("Page closed")
+
+            def wait_for_timeout(self, delay_ms):
+                return None
+
+        page = FakePage()
+
+        with pytest.raises(main_module.PlaywrightError):
+            _read_page_content_with_retries(page, attempts=3, delay_ms=1)
 
 
 # ============= ТЕСТИ EXTRACT JSON =============

@@ -148,19 +148,50 @@ def _parse_cookie_header(cookie_header: Optional[str]) -> List[Dict[str, str]]:
     return cookies
 
 
+def _read_page_content_with_retries(page, attempts: int = 4, delay_ms: int = 1500) -> str:
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return page.content()
+        except PlaywrightError as e:
+            last_error = e
+            if "page is navigating and changing the content" not in str(e).lower() or attempt == attempts:
+                raise
+            logger.warning(
+                f"⚠️ Сторінка ще навігується під час читання content, повтор {attempt}/{attempts}."
+            )
+            page.wait_for_timeout(delay_ms)
+
+    raise last_error
+
+
 def _playwright_fetch_shutdowns(force_headful: bool = False, same_context_retries: int = 1) -> FetchResult:
     """Отримує HTML сторінки через Playwright"""
     cookies = _parse_cookie_header(DTEK_COOKIE)
 
     with sync_playwright() as p:
         browser_type = getattr(p, PLAYWRIGHT_BROWSER, p.chromium)
-        context = browser_type.launch_persistent_context(
-            PLAYWRIGHT_PROFILE_DIR,
-            headless=PLAYWRIGHT_HEADLESS if not force_headful else False,
-            viewport={"width": 1280, "height": 720},
-            locale="uk-UA",
-            timezone_id=TIMEZONE,
-        )
+        try:
+            context = browser_type.launch_persistent_context(
+                PLAYWRIGHT_PROFILE_DIR,
+                headless=PLAYWRIGHT_HEADLESS if not force_headful else False,
+                viewport={"width": 1280, "height": 720},
+                locale="uk-UA",
+                timezone_id=TIMEZONE,
+            )
+        except PlaywrightError as e:
+            logger.error(f"❌ Не вдалося запустити browser context: {e}")
+            return FetchResult(
+                content=None,
+                status="error",
+                mode="playwright_headful" if force_headful else "playwright_headless",
+                used_headful=force_headful,
+                details={
+                    "headful": force_headful,
+                    "profile_dir": PLAYWRIGHT_PROFILE_DIR,
+                    "exception": str(e),
+                },
+            )
 
         try:
             if cookies:
@@ -220,7 +251,7 @@ def _playwright_fetch_shutdowns(force_headful: bool = False, same_context_retrie
                     pass
 
                 try:
-                    content = page.content()
+                    content = _read_page_content_with_retries(page)
                 except PlaywrightError as e:
                     logger.error(f"❌ Не вдалося прочитати content сторінки: {e}")
                     return FetchResult(

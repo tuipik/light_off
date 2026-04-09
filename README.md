@@ -48,7 +48,7 @@ docker compose logs -f
 
 **Перший запуск (Incapsula + без дисплея)**
 
-1. Разовий старт у headful через `xvfb`:
+1. Разовий старт у headful через `xvfb-run` усередині контейнера:
 ```bash
 PLAYWRIGHT_HEADLESS=0 docker compose up -d --build
 ```
@@ -76,7 +76,7 @@ DTEK_COOKIE=visid_incap_...; incap_ses_...=...
 - За замовчуванням Redis для консолі очікується на `localhost:6379`. Якщо ви підняли Redis на іншому порту, задайте `REDIS_PORT`.
 - У Docker Redis зберігає дані у volume `redis_data`.
 - Для обходу Incapsula потрібно один раз пройти перевірку в браузері з профілем. Профіль зберігається у volume `pw_profile`.
-- Якщо Incapsula блокує, запустіть контейнер разово з `PLAYWRIGHT_HEADLESS=0` — в Docker використовується `xvfb`, тому дисплей не потрібен. Після проходження перевірки поверніть `PLAYWRIGHT_HEADLESS=1`.
+- Якщо Incapsula блокує, запустіть контейнер разово з `PLAYWRIGHT_HEADLESS=0` — в Docker сервіс стартує через `xvfb-run`, тому окремий дисплей не потрібен. Після проходження перевірки поверніть `PLAYWRIGHT_HEADLESS=1`.
 - Для технічних алертів (Incapsula) можна задати окремий чат `ALERT_TELEGRAM_CHAT_ID`; якщо не задано, алерти йдуть у `TELEGRAM_CHAT_ID`.
 - При блокуванні сервіс проходить recovery ladder: повтор у тому ж Playwright context, потім fresh browser process з тим самим профілем, і далі headful через `xvfb`, якщо він дозволений.
 - Для розбору блокувань можна зберігати debug-артефакти: `BLOCK_DEBUG_ENABLED=1`, `BLOCK_DEBUG_DIR=debug/blocks`, `BLOCK_DEBUG_MAX_ARTIFACTS=20`. Для кожного block записуються HTML і JSON з метаданими спроби, cookies та response headers.
